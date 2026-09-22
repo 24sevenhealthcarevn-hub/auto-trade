@@ -7,16 +7,21 @@ const crypto = require('crypto');
 const path = require('path');
 const cors = require('cors');
 
-// 1. Import botEngine từ file cùng thư mục
-const botEngine = require('./botEngine');
+// 1. Import botEngine chuẩn đường dẫn Linux (.js)
+const botEngine = require('./botEngine.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-// Phục vụ tệp giao diện index.html tĩnh
-app.use(express.static(path.join(__dirname)));
+
+// Phục vụ tệp tĩnh và định tuyến trang chủ index.html
+app.use(express.static(__dirname));
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 
 /* ========================================================
    1. UTILS & SIGNATURE HELPERS
@@ -24,7 +29,7 @@ app.use(express.static(path.join(__dirname)));
 
 // Hàm tạo chữ ký HMAC-SHA256 cho OKX Private API
 function generateOkxSignature(timestamp, method, requestPath, body = '') {
-  const secretKey = process.env.OKX_SECRET_KEY || '55D97BC2B8E2457EAA62F6152BEE9C03';
+  const secretKey = process.env.OKX_SECRET_KEY || '';
   const message = timestamp + method.toUpperCase() + requestPath + body;
   return crypto.createHmac('sha256', secretKey).update(message).digest('base64');
 }
@@ -60,10 +65,10 @@ app.get('/api/okx/balance', async (req, res) => {
 
     const response = await axios.get(`https://www.okx.com${requestPath}`, {
       headers: {
-        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '7ffea234-8094-4f4c-91f6-1773d2370b5c',
+        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
         'OK-ACCESS-SIGN': signature,
         'OK-ACCESS-TIMESTAMP': timestamp,
-        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || 'Minhtantruong@1688',
+        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
         'Content-Type': 'application/json'
       }
     });
@@ -86,10 +91,10 @@ app.post('/api/okx/order', async (req, res) => {
 
     const response = await axios.post(`https://www.okx.com${requestPath}`, req.body, {
       headers: {
-        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '7ffea234-8094-4f4c-91f6-1773d2370b5c',
+        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
         'OK-ACCESS-SIGN': signature,
         'OK-ACCESS-TIMESTAMP': timestamp,
-        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || 'Minhtantruong@1688',
+        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
         'Content-Type': 'application/json'
       }
     });
@@ -115,10 +120,10 @@ app.use('/api/okx-proxy/*', async (req, res) => {
     const signature = generateOkxSignature(timestamp, method, targetPath, bodyString);
 
     const headers = {
-      'OK-ACCESS-KEY': process.env.OKX_API_KEY || '7ffea234-8094-4f4c-91f6-1773d2370b5c',
+      'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
       'OK-ACCESS-SIGN': signature,
       'OK-ACCESS-TIMESTAMP': timestamp,
-      'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || 'Minhtantruong@1688',
+      'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
       'Content-Type': 'application/json'
     };
 
@@ -143,7 +148,7 @@ app.use('/api/okx-proxy/*', async (req, res) => {
    3. AUTO TRADE ENGINE API & CONTROLLER
    ======================================================== */
 
-// 1. Kích hoạt Auto Trade (Nút "Bắt đầu Auto Trade" trên UI)
+// 1. Kích hoạt Auto Trade
 app.post('/api/autotrade/start', (req, res) => {
   const currentState = botEngine.getTradingState();
   if (currentState) {
@@ -156,7 +161,7 @@ app.post('/api/autotrade/start', (req, res) => {
   res.json({ ok: true, running: true });
 });
 
-// 2. Dừng Auto Trade (Nút "Dừng Auto Trade" trên UI)
+// 2. Dừng Auto Trade
 app.post('/api/autotrade/stop', (req, res) => {
   botEngine.setTradingState(false);
   console.log('🛑 AUTO TRADE: ĐÃ NGẮT TOÀN BỘ LUỒNG CHẠY NGẦM');
@@ -181,7 +186,7 @@ app.post('/api/bot/toggle', (req, res) => {
   });
 });
 
-// 4. Lấy trạng thái BOT và danh sách lệnh active để đồng bộ với Frontend
+// 4. Lấy trạng thái BOT và đồng bộ với Frontend
 app.get(['/api/autotrade/status', '/api/bot/status'], (req, res) => {
   const isRunning = botEngine.getTradingState();
   res.json({
@@ -202,7 +207,6 @@ const SCAN_INTERVAL = 15000; // Quét tín hiệu và monitor mỗi 15 giây
 
 setInterval(async () => {
   try {
-    // Luôn chạy vòng lặp botEngine để quét giá và theo dõi lệnh
     await botEngine.runBotCycle();
   } catch (err) {
     console.error('❌ Lỗi Bot ngầm Render:', err.message);
@@ -215,7 +219,7 @@ setInterval(async () => {
 
 app.listen(PORT, () => {
   console.log(`=================================`);
-  console.log(`🚀 Server Node.js đang chạy tại: http://localhost:${PORT}`);
+  console.log(`🚀 Server Node.js đang chạy tại port: ${PORT}`);
   console.log(`🤖 BOT Engine đã tích hợp và sẵn sàng!`);
   console.log(`=================================`);
 });
