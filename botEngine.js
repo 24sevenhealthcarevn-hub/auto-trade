@@ -14,9 +14,10 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
-const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
-const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
-const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+// Đọc trực tiếp từ Environment Variables của Render
+const apiKey = process.env.OKX_API_KEY || '';
+const secretKey = process.env.OKX_SECRET_KEY || '';
+const passphrase = process.env.OKX_PASSPHRASE || '';
 
 let isTrading = false;
 let isScanning = false;
