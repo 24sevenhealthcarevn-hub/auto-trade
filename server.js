@@ -7,6 +7,11 @@ const crypto = require('crypto');
 const path = require('path');
 const cors = require('cors');
 
+// Cấu hình thông tin API OKX (Nạp trực tiếp làm giá trị fallback)
+const OKX_API_KEY = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+
 // 1. Import botEngine chuẩn đường dẫn Linux (.js)
 const botEngine = require('./botEngine.js');
 
@@ -29,9 +34,8 @@ app.get('/', (req, res) => {
 
 // Hàm tạo chữ ký HMAC-SHA256 cho OKX Private API
 function generateOkxSignature(timestamp, method, requestPath, body = '') {
-  const secretKey = process.env.OKX_SECRET_KEY || '';
   const message = timestamp + method.toUpperCase() + requestPath + body;
-  return crypto.createHmac('sha256', secretKey).update(message).digest('base64');
+  return crypto.createHmac('sha256', OKX_SECRET_KEY).update(message).digest('base64');
 }
 
 // Endpoint Health Check cho UptimeRobot giữ Render luôn chạy 24/7
@@ -65,10 +69,10 @@ app.get('/api/okx/balance', async (req, res) => {
 
     const response = await axios.get(`https://www.okx.com${requestPath}`, {
       headers: {
-        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
+        'OK-ACCESS-KEY': OKX_API_KEY,
         'OK-ACCESS-SIGN': signature,
         'OK-ACCESS-TIMESTAMP': timestamp,
-        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
+        'OK-ACCESS-PASSPHRASE': OKX_PASSPHRASE,
         'Content-Type': 'application/json'
       }
     });
@@ -91,10 +95,10 @@ app.post('/api/okx/order', async (req, res) => {
 
     const response = await axios.post(`https://www.okx.com${requestPath}`, req.body, {
       headers: {
-        'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
+        'OK-ACCESS-KEY': OKX_API_KEY,
         'OK-ACCESS-SIGN': signature,
         'OK-ACCESS-TIMESTAMP': timestamp,
-        'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
+        'OK-ACCESS-PASSPHRASE': OKX_PASSPHRASE,
         'Content-Type': 'application/json'
       }
     });
@@ -120,10 +124,10 @@ app.use('/api/okx-proxy/*', async (req, res) => {
     const signature = generateOkxSignature(timestamp, method, targetPath, bodyString);
 
     const headers = {
-      'OK-ACCESS-KEY': process.env.OKX_API_KEY || '',
+      'OK-ACCESS-KEY': OKX_API_KEY,
       'OK-ACCESS-SIGN': signature,
       'OK-ACCESS-TIMESTAMP': timestamp,
-      'OK-ACCESS-PASSPHRASE': process.env.OKX_PASSPHRASE || '',
+      'OK-ACCESS-PASSPHRASE': OKX_PASSPHRASE,
       'Content-Type': 'application/json'
     };
 
