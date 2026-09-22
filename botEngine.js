@@ -259,11 +259,13 @@ function calcTP_SL(last, atr, isLong) {
 /* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-        const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+        const response = await axios.get(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+        const instRes = response.data;
         const info = instRes?.data?.[0];
-        if (!info) {
-            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
-            return null;
+           if (!info) {
+              log(`❌ Không lấy được thông tin instrument cho ${instId}`);
+              return null;
+              }
         }
 
         const ctVal = parseFloat(info.ctVal);
