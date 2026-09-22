@@ -269,7 +269,20 @@ if (!apiKey) {
 
   try {
     // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
-    const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+    let instRes = null;
+    try {
+      // Ưu tiên gọi qua okxApiRequest, nếu không có sẽ tự fallback gọi qua OKX API trực tiếp
+      if (typeof okxApiRequest === 'function') {
+        instRes = await okxApiRequest(`/public/instruments?instType=SWAP&instId=${instId}`, 'GET');
+      } else {
+        const response = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+        instRes = await response.json();
+      }
+    } catch (err) {
+      log(`❌ Lỗi lấy thông tin instrument cho ${instId}: ${err.message}`);
+      return null;
+    }
+
     const info = instRes?.data?.[0];
     if (!info) return null;
 
