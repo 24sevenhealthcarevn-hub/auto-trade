@@ -1,4 +1,3 @@
-
 /* ========================================================
    botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX
    ======================================================== */
@@ -78,7 +77,6 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    // Điền trực tiếp chuỗi Key của bạn vào đây
     const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
     const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
     const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
@@ -142,7 +140,7 @@ function initWebSocket() {
 
     ws.on('message', (data) => {
         try {
-            if (data.toString() === 'pong') return; // Bỏ qua heartbeat
+            if (data.toString() === 'pong') return;
             const msg = JSON.parse(data.toString());
             if (!msg?.data) return;
 
@@ -259,24 +257,19 @@ function calcTP_SL(last, atr, isLong) {
 /* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-    const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
-    const instRes = await res.json();
-    const info = instRes?.data?.[0];
-    if (!info) {
-        log(`❌ Không lấy được thông tin instrument cho ${instId}`);
-        return null;
-    }
-} catch (err) {
-    log(`❌ Lỗi lấy thông tin instrument cho ${instId}: ${err.message}`);
-    return null;
-}
+        const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+        const instRes = await res.json();
+        const info = instRes?.data?.[0];
+        if (!info) {
+            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
+            return null;
+        }
 
         const ctVal = parseFloat(info.ctVal);
         const lotSz = parseFloat(info.lotSz);
         const minSz = parseFloat(info.minSz || lotSz);
         const tickSz = parseFloat(info.tickSz || "0.0001");
         
-        // Tính số chữ số thập phân cho đơn vị giá (tickSz)
         const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
         const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
@@ -284,7 +277,6 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         let qtyStr = "";
         let leverageFixed = false;
 
-        // Vòng lặp tự động hạ đòn bẩy khi bị giới hạn OKX
         while (currentLeverage >= 10) {
             const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
                 instId,
@@ -320,11 +312,9 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
 
         if (!leverageFixed) return null;
 
-        // Định dạng giá TP/SL chính xác theo bước giá (tickSz) của OKX
         const tpStr = tpPrice.toFixed(pPrec);
         const slStr = slPrice.toFixed(pPrec);
 
-        // Đính kèm TP/SL vào lệnh
         const attachAlgoOrds = [
             {
                 "algoOrdType": "take_profit",
@@ -403,7 +393,6 @@ async function scanOnce() {
     try {
         initWebSocket();
 
-        // 1. Kiểm tra số dư khi Auto Trade đang bật
         if (isTrading) {
             const { availBal, eq } = await getAccountBalance();
             log(`💰 [OKX ACCOUNT] Số dư khả dụng: ${availBal.toFixed(2)} USDT | Tổng tài sản: ${eq.toFixed(2)} USDT`);
@@ -500,7 +489,6 @@ async function masterFlow(qualityCandidates) {
             if (openIds.size >= 10) break;
             if (openIds.has(p.instId)) continue;
 
-            // Tiến hành mở lệnh với logic chuẩn
             await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
         }
     } catch (e) {
