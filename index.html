@@ -250,19 +250,22 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
   const leverage = parseInt(document.getElementById('leverage').value);
 
   // 1. KIỂM TRA ĐẦU VÀO (CAPITAL, LEVERAGE, API KEYS)
-  if (!capital || capital <= 0) {
-    log("❌ Vốn không hợp lệ");
-    return null;
-  }
-  if (!leverage || leverage < 1) {
-    log("❌ Đòn bẩy không hợp lệ");
-    return null;
-  }
+if (!capital || capital <= 0) {
+  log("❌ Vốn không hợp lệ");
+  return null;
+}
+if (!leverage || leverage < 1) {
+  log("❌ Đòn bẩy không hợp lệ");
+  return null;
+}
 
-  if (!apiKey) {
-    log('❌ Chưa cấu hình API Keys cho trading');
-    return null;
-  }
+// Bổ sung giá trị API Key trực tiếp tại đây
+const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+
+if (!apiKey) {
+  log('❌ Chưa cấu hình API Keys cho trading');
+  return null;
+}
 
   try {
     // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
