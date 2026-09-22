@@ -14,10 +14,10 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
-// Đọc trực tiếp từ Environment Variables của Render
-const apiKey = process.env.OKX_API_KEY || '';
-const secretKey = process.env.OKX_SECRET_KEY || '';
-const passphrase = process.env.OKX_PASSPHRASE || '';
+// Dán trực tiếp thông tin API OKX vào đây:
+const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
 let isTrading = false;
 let isScanning = false;
@@ -78,12 +78,7 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    // Đọc trực tiếp từ Environment Variables của Render
-    const currentApiKey = process.env.OKX_API_KEY || apiKey;
-    const currentSecretKey = process.env.OKX_SECRET_KEY || secretKey;
-    const currentPassphrase = process.env.OKX_PASSPHRASE || passphrase;
-
-    if (!currentApiKey || !currentSecretKey || !currentPassphrase) {
+    if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
         return null;
     }
@@ -94,17 +89,17 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
     const bodyStr = (methodUpper === 'GET' || !body) ? '' : JSON.stringify(body);
 
     const msg = ts + methodUpper + fullEndpoint + bodyStr;
-    const sign = crypto.createHmac('sha256', currentSecretKey).update(msg).digest('base64');
+    const sign = crypto.createHmac('sha256', secretKey).update(msg).digest('base64');
 
     try {
         const config = {
             method: methodUpper,
             url: 'https://www.okx.com' + fullEndpoint,
             headers: {
-                'OK-ACCESS-KEY': currentApiKey,
+                'OK-ACCESS-KEY': apiKey,
                 'OK-ACCESS-SIGN': sign,
                 'OK-ACCESS-TIMESTAMP': ts,
-                'OK-ACCESS-PASSPHRASE': currentPassphrase,
+                'OK-ACCESS-PASSPHRASE': passphrase,
                 'Content-Type': 'application/json'
             }
         };
