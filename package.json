@@ -1,11 +1,17 @@
 {
   "name": "okx-auto-trade",
   "version": "1.0.0",
-  "main": "index.html",
+  "description": "OKX Trading Bot",
+  "main": "server.js",
   "scripts": {
-    "start": "npx serve ."
+    "start": "node server.js"
   },
   "dependencies": {
-    "serve": "^14.2.0"
+    "express": "^4.19.2",
+    "axios": "^1.7.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
