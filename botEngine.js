@@ -78,6 +78,11 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
+    // Điền trực tiếp chuỗi Key của bạn vào đây
+    const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+    const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+    const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+
     if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
         return null;
