@@ -554,7 +554,7 @@ async function scanOnce(){
         };
       })
       .sort((a, b) => b.absDelta1h - a.absDelta1h)
-      .slice(0, Math.min(CANDIDATE_LIMIT || 30, 30)); // Giới hạn tối đa 30 coin để chặn triệt để 429
+      .slice(0, Math.min(CANDIDATE_LIMIT || 120, 120)); // Giới hạn tối đa 30 coin để chặn triệt để 429
 
     // BƯỚC 3: CHỈ NẾU CẦN LẤY ATR BỔ SUNG CHO CÁC COIN CHƯA CÓ TRONG CACHE REST
     scanBtn.textContent = `⏳ Tính ATR/Price 1h cho ${tickers.length} cặp (Song song có giới hạn)...`;
