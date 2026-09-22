@@ -24,7 +24,6 @@ const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
 let isTrading = false;
-let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
