@@ -78,8 +78,13 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    if (!apiKey || !secretKey || !passphrase) {
-        log("❌ Chưa cấu hình API Key OKX!");
+    // Đọc trực tiếp từ Environment Variables của Render
+    const currentApiKey = process.env.OKX_API_KEY || apiKey;
+    const currentSecretKey = process.env.OKX_SECRET_KEY || secretKey;
+    const currentPassphrase = process.env.OKX_PASSPHRASE || passphrase;
+
+    if (!currentApiKey || !currentSecretKey || !currentPassphrase) {
+        log("❌ Chưa cấu hình API Keys cho trading");
         return null;
     }
 
@@ -89,17 +94,17 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
     const bodyStr = (methodUpper === 'GET' || !body) ? '' : JSON.stringify(body);
 
     const msg = ts + methodUpper + fullEndpoint + bodyStr;
-    const sign = crypto.createHmac('sha256', secretKey).update(msg).digest('base64');
+    const sign = crypto.createHmac('sha256', currentSecretKey).update(msg).digest('base64');
 
     try {
         const config = {
             method: methodUpper,
             url: 'https://www.okx.com' + fullEndpoint,
             headers: {
-                'OK-ACCESS-KEY': apiKey,
+                'OK-ACCESS-KEY': currentApiKey,
                 'OK-ACCESS-SIGN': sign,
                 'OK-ACCESS-TIMESTAMP': ts,
-                'OK-ACCESS-PASSPHRASE': passphrase,
+                'OK-ACCESS-PASSPHRASE': currentPassphrase,
                 'Content-Type': 'application/json'
             }
         };
