@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>DOM Flow — OKX Futures — Top5 Real (Auto Trade) BOT OF MS HỒNG</title>
+<title>DOM Flow — OKX Futures — Top5 Real (Auto Trade)</title>
 <style>
 :root{--bg:#07070a;--muted:#9aa3b2;--accent:#22c55e;--danger:#ef4444;--warning:#eab308;}
 html,body{height:100%;margin:0;font-family:ui-monospace,monospace;background:var(--bg);color:#e6eef6}
@@ -42,7 +42,7 @@ th{color:var(--muted);font-weight:600}
 </head>
 <body>
 <div class="wrap">
-  <h1>DOM Flow — OKX Futures — Top5 Real (Auto Trade)</h1>
+  <h1>DOM Flow — OKX Futures — Top5 Real (Auto Trade) BOT OF MS HỒNG</h1>
   <div class="small">TP = last ± ATR(1h)×2 • SL = last ∓ ATR(1h)×1.5 • Top5 cố định đến khi TP/SL</div>
 
   <div class="controls">
@@ -56,7 +56,7 @@ th{color:var(--muted);font-weight:600}
   <div class="trade-config">
     <div class="config-group">
       <span class="config-label">Vốn mỗi lệnh (USDT):</span>
-      <input type="number" id="capitalPerTrade" class="config-input" value="10" min="1" max="1000">
+      <input type="number" id="capitalPerTrade" class="config-input" value="10" min="0.1" max="1000">
     </div>
     <div class="config-group">
       <span class="config-label">Đòn bẩy:</span>
@@ -208,6 +208,11 @@ async function getSignature(timestamp, method, requestPath, body = '') {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
+  // Gán trực tiếp chuỗi Key vào đây
+  const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+  const secretKey = '8C07B300FE8DEA411762AB34C232AD6F';
+  const passphrase = 'Hongnguyen@1987';
+
   if (!apiKey || !secretKey || !passphrase) {
     log('❌ Chưa cấu hình API Keys');
     return null;
@@ -1039,4 +1044,3 @@ window.addEventListener('beforeunload', () => {
 </script>
 </body>
 </html>
-
