@@ -259,8 +259,8 @@ function calcTP_SL(last, atr, isLong) {
 /* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-    const response = await axios.get(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
-    const instRes = response.data;
+    const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+    const instRes = await res.json();
     const info = instRes?.data?.[0];
     if (!info) {
         log(`❌ Không lấy được thông tin instrument cho ${instId}`);
