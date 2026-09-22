@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>DOM Flow — OKX Futures — Top5 Real (Auto Trade) - Hoàn Thiện TP/SL Server</title>
+<title>DOM Flow — OKX Futures — Top5 Real (Auto Trade) BOT OF MS HỒNG</title>
 <style>
 :root{--bg:#07070a;--muted:#9aa3b2;--accent:#22c55e;--danger:#ef4444;--warning:#eab308;}
 html,body{height:100%;margin:0;font-family:ui-monospace,monospace;background:var(--bg);color:#e6eef6}
@@ -722,6 +722,7 @@ function ensureWS(){
   try {
     if(ws) {
       ws.onclose = null;
+      ws.onerror = null;
       ws.close();
       ws = null;
     }
@@ -736,13 +737,17 @@ function ensureWS(){
     
     clearInterval(pingIntervalId);
     pingIntervalId = setInterval(() => {
-      if(ws.readyState === 1) {
-        ws.send(JSON.stringify({op: 'ping'}));
+      if(ws && ws.readyState === 1) {
+        // FIXED 1: Gửi chuỗi "ping" thô chuẩn API OKX thay vì JSON
+        ws.send("ping");
       }
     }, 15000);
   };
   
   ws.onmessage = e => {
+    // FIXED 2: Bỏ qua phản hồi "pong" dạng chuỗi thô từ OKX
+    if (e.data === 'pong') return;
+
     try {
       const m = JSON.parse(e.data);
       if(m.event === 'pong') return;
@@ -779,8 +784,6 @@ function ensureWS(){
               log(`${pos.base} hit ${hit} (${isPump ? 'Pump' : 'Dump'}) @ ${fmt(pos.last)}`);
 
               if (activeOrders[inst]) {
-                // Chúng ta vẫn gọi closeOrder để nó CẬP NHẬT TRẠNG THÁI NỘI BỘ VÀ TÍNH PnL.
-                // Hàm closeOrder đã được cải tiến để không bị lỗi nếu OKX đã đóng trước.
                 closeOrder(inst, hit); 
               }
               
@@ -804,7 +807,8 @@ function ensureWS(){
   };
   
   ws.onerror = (err) => {
-    log('❌ WS Error: ' + err.message);
+    // FIXED 3: Bỏ .message để tránh hiện undefined trong Log
+    log('❌ WS Error');
   };
 }
 
@@ -967,72 +971,51 @@ async function checkApiKeysValidity() {
 }
 
 async function toggleTrading() {
-  isTrading = !isTrading;
   const btn = document.getElementById('toggleTrade');
-  
-  if (isTrading) {
-    btn.textContent = '🟢 Dừng Auto Trade';
-    btn.className = 'btn-stop';
-    log('✅ Bắt đầu Auto Trade');
-    
-    // Kiểm tra và nhập lại API keys
-    if (!apiKey || !secretKey || !passphrase) {
-      const key = prompt('Nhập OKX API Key:');
-      const secret = prompt('Nhập OKX Secret Key:');
-      const phrase = prompt('Nhập OKX Passphrase:');
-      
-      if (key && secret && phrase) {
-        saveApiKeys(key, secret, phrase);
-      } else {
-        log('❌ Cần cấu hình API Keys để trading');
-        isTrading = false;
-        btn.textContent = '🔴 Bắt đầu Auto Trade';
-        btn.className = 'btn-trade';
-        return;
-      }
-    }
-    
-    // BƯỚC KIỂM TRA API NGAY LẬP TỨC
-    const isValid = await checkApiKeysValidity();
-    if (!isValid) {
-        isTrading = false;
-        btn.textContent = '🔴 Bắt đầu Auto Trade';
-        btn.className = 'btn-trade';
-        return;
-    }
-    
-    // Đặt lệnh cho các position hiện tại (song song)
-    setTimeout(() => {
-      const tradePromises = [];
+  if (!btn) return;
 
-      for (const inst of topPump) {
-        if (positions[inst]?.status === 'open' && !positions[inst]?.hasOrder && !activeOrders[inst]) {
-          tradePromises.push(
-            placeOrder(inst, 'buy', positions[inst].last, positions[inst].sl, positions[inst].tp)
-              .then(order => {
-                if (order) positions[inst].hasOrder = true;
-              })
-          );
-        }
-      }
-      
-      for (const inst of topDump) {
-        if (positions[inst]?.status === 'open' && !positions[inst]?.hasOrder && !activeOrders[inst]) {
-          tradePromises.push(
-            placeOrder(inst, 'sell', positions[inst].last, positions[inst].sl, positions[inst].tp)
-              .then(order => {
-                if (order) positions[inst].hasOrder = true;
-              })
-          );
-        }
-      }
-      Promise.all(tradePromises);
-    }, 1000);
+  btn.disabled = true;
+
+  try {
+    // 1. Kiểm tra trạng thái hiện tại của Bot trên Server Render trước
+    const statusRes = await fetch('/api/autotrade/status');
+    const statusData = await statusRes.json();
     
-  } else {
-    btn.textContent = '🔴 Bắt đầu Auto Trade';
-    btn.className = 'btn-trade';
-    log('⏸️ Dừng Auto Trade');
+    // Nếu lấy được trạng thái từ server thì dùng, nếu không thì lấy theo biến client
+    const isCurrentlyRunning = (statusData && typeof statusData.running === 'boolean') 
+      ? statusData.running 
+      : isTrading;
+
+    // 2. Xác định Endpoint gửi lệnh: Nếu đang chạy -> Gửi lệnh STOP, nếu đang dừng -> Gửi lệnh START
+    const endpoint = isCurrentlyRunning ? '/api/autotrade/stop' : '/api/autotrade/start';
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    const data = await response.json();
+
+    if (data.ok) {
+      // 3. Cập nhật biến isTrading toàn cục theo phản hồi của Server
+      isTrading = data.running;
+
+      if (isTrading) {
+        btn.textContent = '🟢 Dừng Auto Trade';
+        btn.className = 'btn-stop';
+        log('🚀 Đã BẬT Auto Trade chạy ngầm 24/7 trên Render thành công!');
+      } else {
+        btn.textContent = '🔴 Bắt đầu Auto Trade';
+        btn.className = 'btn-trade';
+        log('🛑 Đã DỪNG Auto Trade trên Render!');
+      }
+    } else {
+      log('⚠️ Lỗi phản hồi từ Server: ' + (data.message || 'Không thể đổi trạng thái'));
+    }
+  } catch (error) {
+    log('❌ Không thể kết nối tới Server Render: ' + error.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1056,3 +1039,4 @@ window.addEventListener('beforeunload', () => {
 </script>
 </body>
 </html>
+
