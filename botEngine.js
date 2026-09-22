@@ -13,17 +13,12 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
-// Dán trực tiếp thông tin API OKX vào đây:
-const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
-const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
-const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
-
 let isTrading = false;
 let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
+// Cấu hình giao dịch mặc định
 let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
 let defaultLeverage = 20;  // Đòn bẩy mặc định
 
@@ -44,7 +39,6 @@ let topDump = [];
 const log = msg => {
     const formattedMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
     console.log(formattedMsg);
-    // Phát log tới server.js để gửi về giao diện Web nếu có callback
     if (global.broadcastLog && typeof global.broadcastLog === 'function') {
         global.broadcastLog(formattedMsg);
     }
@@ -66,7 +60,7 @@ async function sendTelegram(message) {
     }
 }
 
-/* ================== API CORE ================== */
+/* ================== API CORE (ĐÃ GÁN CỨNG API KEYS TRÁNH LỖI HMAC) ================== */
 async function okxPublic(endpoint) {
     try {
         const res = await axios.get(OKX_API_BASE + endpoint);
@@ -77,9 +71,10 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
-    const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
-    const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+    // Gán cứng trực tiếp thông tin API OKX để tránh lỗi biến môi trường rỗng trên Cloud
+    const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+    const secretKey = '8C07B300FE8DEA411762AB34C232AD6F';
+    const passphrase = 'Hongnguyen@1987';
 
     if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
@@ -165,9 +160,7 @@ function initWebSocket() {
                     activeOrders[inst].last = last;
                 }
             }
-        } catch (err) {
-            // Bỏ qua lỗi parse
-        }
+        } catch (err) {}
     });
 
     ws.on('close', () => {
@@ -175,9 +168,7 @@ function initWebSocket() {
         autoReconnectWS();
     });
 
-    ws.on('error', (err) => {
-        // WS error
-    });
+    ws.on('error', (err) => {});
 }
 
 function autoReconnectWS() {
@@ -254,12 +245,11 @@ function calcTP_SL(last, atr, isLong) {
     return { tp, sl };
 }
 
-/* ================== ORDER EXECUTION (PLACE ORDER) ================== */
+/* ================== ORDER EXECUTION ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-        const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
-        const instRes = await res.json();
-        const info = instRes?.data?.[0];
+        const res = await axios.get(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+        const info = res?.data?.data?.[0];
         if (!info) {
             log(`❌ Không lấy được thông tin instrument cho ${instId}`);
             return null;
@@ -510,9 +500,7 @@ async function monitorOrders() {
                 delete activeOrders[id];
             }
         }
-    } catch (e) {
-        // Monitor error
-    }
+    } catch (e) {}
 }
 
 /* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
@@ -526,7 +514,6 @@ function getTradingState() {
     return isTrading;
 }
 
-/* ================== BOT CYCLE METHOD FOR SERVER.JS ================== */
 async function runBotCycle() {
     await monitorOrders();
     await scanOnce();
