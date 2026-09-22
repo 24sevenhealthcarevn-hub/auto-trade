@@ -23,10 +23,6 @@ let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-let isTrading = false;
-const CONCURRENCY_LIMIT = 5;
-const TOP_N = 5;
-
 // Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
 let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
 let defaultLeverage = 20;  // Đòn bẩy mặc định
