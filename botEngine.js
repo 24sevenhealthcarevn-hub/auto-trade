@@ -1,5 +1,6 @@
+
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS)
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -17,32 +18,41 @@ const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b'
 const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
 const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
-let sentSignals = {};
 let isTrading = false;
 let isScanning = false;
-let isClosingAll = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
+
+let isTrading = false;
+let isScanning = false;
+const CONCURRENCY_LIMIT = 5;
+const TOP_N = 5;
+
+// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
+let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
+let defaultLeverage = 20;  // Đòn bẩy mặc định
 
 let ws = null;
 let wsSubscribed = new Set();
 let isWsReconnecting = false;
 
-// Trạng thái lưu trên RAM (thay cho localStorage)
+// Trạng thái lưu trên RAM
 let activeOrders = {};
 let tradeHistory = [];
-let fillerCooldown = {};
-let positionsData = {};
-let instrumentCache = {};
 let atrCache = {};
 const ATR_CACHE_TTL = 5 * 60 * 1000;
 
 let topPump = [];
 let topDump = [];
 
-/* ================== UTILS ================== */
+/* ================== UTILS & LOGGING ================== */
 const log = msg => {
-    console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    const formattedMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    console.log(formattedMsg);
+    // Phát log tới server.js để gửi về giao diện Web nếu có callback
+    if (global.broadcastLog && typeof global.broadcastLog === 'function') {
+        global.broadcastLog(formattedMsg);
+    }
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -57,11 +67,11 @@ async function sendTelegram(message) {
             parse_mode: 'HTML'
         });
     } catch (e) {
-        // Bỏ qua lỗi gửi tin nhắn
+        // Bỏ qua lỗi gửi Telegram
     }
 }
 
-/* ================== API CORE (NODE.JS CRYPTO) ================== */
+/* ================== API CORE ================== */
 async function okxPublic(endpoint) {
     try {
         const res = await axios.get(OKX_API_BASE + endpoint);
@@ -73,7 +83,7 @@ async function okxPublic(endpoint) {
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
     if (!apiKey || !secretKey || !passphrase) {
-        console.warn("Chưa cấu hình API Key OKX!");
+        log("❌ Chưa cấu hình API Key OKX!");
         return null;
     }
 
@@ -102,16 +112,16 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
 
         const res = await axios(config);
         if (res.data && res.data.code !== "0") {
-            console.warn('OKX API ERROR:', res.data.code, res.data.msg, 'Path:', fullEndpoint);
+            log(`⚠️ OKX API Error (${fullEndpoint}): Code ${res.data.code} - ${res.data.msg}`);
         }
         return res.data;
     } catch (e) {
-        console.error('okxApiRequest error:', e.response ? e.response.data : e.message);
+        log(`❌ okxApiRequest Exception: ${e.response ? JSON.stringify(e.response.data) : e.message}`);
         return null;
     }
 }
 
-/* ================== WEBSOCKET (NODE.JS) ================== */
+/* ================== WEBSOCKET ================== */
 function initWebSocket() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
@@ -131,6 +141,7 @@ function initWebSocket() {
 
     ws.on('message', (data) => {
         try {
+            if (data.toString() === 'pong') return; // Bỏ qua heartbeat
             const msg = JSON.parse(data.toString());
             if (!msg?.data) return;
 
@@ -156,17 +167,17 @@ function initWebSocket() {
                 }
             }
         } catch (err) {
-            console.error("WS Message Error:", err.message);
+            // Bỏ qua lỗi parse
         }
     });
 
     ws.on('close', () => {
-        log("❌ WebSocket Closed. Reconnecting in 3s...");
+        log("⚠️ WebSocket Closed. Reconnecting in 3s...");
         autoReconnectWS();
     });
 
     ws.on('error', (err) => {
-        console.error("WS Error:", err.message);
+        // WS error
     });
 }
 
@@ -189,7 +200,21 @@ function subscribeWS(instIds) {
     }
 }
 
-/* ================== DATA FETCHING ================== */
+/* ================== DATA FETCHING & ACCOUNT ================== */
+async function getAccountBalance() {
+    try {
+        const res = await okxApiRequest('/account/balance?ccy=USDT', 'GET');
+        if (res && res.code === '0' && res.data?.[0]?.details?.[0]) {
+            const availBal = parseFloat(res.data[0].details[0].availBal || 0);
+            const eq = parseFloat(res.data[0].details[0].eq || 0);
+            return { availBal, eq };
+        }
+    } catch (err) {
+        log(`❌ Lỗi kiểm tra số dư: ${err.message}`);
+    }
+    return { availBal: 0, eq: 0 };
+}
+
 async function fetchATR_Price1h(instId) {
     try {
         const now = Date.now();
@@ -230,13 +255,159 @@ function calcTP_SL(last, atr, isLong) {
     return { tp, sl };
 }
 
-/* ================== CORE SCAN & TRADE ================== */
+/* ================== ORDER EXECUTION (PLACE ORDER) ================== */
+async function placeOrder(instId, side, price, slPrice, tpPrice) {
+    try {
+        const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+        const info = instRes?.data?.[0];
+        if (!info) {
+            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
+            return null;
+        }
+
+        const ctVal = parseFloat(info.ctVal);
+        const lotSz = parseFloat(info.lotSz);
+        const minSz = parseFloat(info.minSz || lotSz);
+        const tickSz = parseFloat(info.tickSz || "0.0001");
+        
+        // Tính số chữ số thập phân cho đơn vị giá (tickSz)
+        const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
+        const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
+
+        let currentLeverage = defaultLeverage;
+        let qtyStr = "";
+        let leverageFixed = false;
+
+        // Vòng lặp tự động hạ đòn bẩy khi bị giới hạn OKX
+        while (currentLeverage >= 10) {
+            const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
+                instId,
+                lever: currentLeverage.toString(),
+                mgnMode: 'cross'
+            });
+
+            if (levRes?.code === '0' || levRes?.code === '32115') {
+                let rawQty = (capitalPerTrade * currentLeverage) / (price * ctVal);
+                let qty = Math.floor(rawQty / lotSz) * lotSz;
+
+                if (qty < minSz) {
+                    log(`⚠️ ${instId}: Vốn ${capitalPerTrade} USDT không đủ để mở vị thế tối thiểu (${minSz} lot).`);
+                    return null;
+                }
+
+                qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
+                leverageFixed = true;
+                break;
+            } else if (levRes?.code === '59102') {
+                if (currentLeverage > 50) currentLeverage = 50;
+                else if (currentLeverage > 30) currentLeverage = 30;
+                else if (currentLeverage > 20) currentLeverage = 20;
+                else if (currentLeverage > 10) currentLeverage = 10;
+                else break;
+
+                log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x do giới hạn OKX`);
+            } else {
+                log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
+                return null;
+            }
+        }
+
+        if (!leverageFixed) return null;
+
+        // Định dạng giá TP/SL chính xác theo bước giá (tickSz) của OKX
+        const tpStr = tpPrice.toFixed(pPrec);
+        const slStr = slPrice.toFixed(pPrec);
+
+        // Đính kèm TP/SL vào lệnh
+        const attachAlgoOrds = [
+            {
+                "algoOrdType": "take_profit",
+                "sz": qtyStr,
+                "tpTriggerPx": tpStr,
+                "tpOrdPx": "-1"
+            },
+            {
+                "algoOrdType": "stop_loss",
+                "sz": qtyStr,
+                "slTriggerPx": slStr,
+                "slOrdPx": "-1"
+            }
+        ];
+
+        const sideLower = side.toLowerCase();
+        const posSide = sideLower === 'buy' ? 'long' : 'short';
+
+        const orderResult = await okxApiRequest('/trade/order', 'POST', {
+            instId,
+            tdMode: 'cross',
+            side: sideLower,
+            ordType: 'market',
+            sz: qtyStr,
+            posSide: posSide,
+            attachAlgoOrds: attachAlgoOrds
+        });
+
+        if (orderResult && orderResult.code === '0') {
+            const orderId = orderResult.data[0].ordId;
+            const quantity = parseFloat(qtyStr);
+            const notional = quantity * price * ctVal;
+            const margin = notional / currentLeverage;
+
+            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
+            log(successLog);
+            sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
+
+            const orderInfo = {
+                id: orderId,
+                instId,
+                side: sideLower,
+                price,
+                quantity,
+                slPrice,
+                tpPrice,
+                capital: capitalPerTrade,
+                leverage: currentLeverage,
+                margin,
+                notional,
+                timestamp: Date.now(),
+                status: 'open'
+            };
+
+            activeOrders[instId] = orderInfo;
+            return orderInfo;
+        } else {
+            log(`❌ Lỗi đặt lệnh ${instId}: ${orderResult?.msg || 'Lỗi không xác định'}`);
+            return null;
+        }
+    } catch (err) {
+        log(`❌ Ngoại lệ khi đặt lệnh ${instId}: ${err.message}`);
+        return null;
+    }
+}
+
+function sideUpper(s) {
+    return String(s).toUpperCase();
+}
+
+/* ================== CORE SCAN & MASTER FLOW ================== */
 async function scanOnce() {
     if (isScanning) return;
     isScanning = true;
 
     try {
         initWebSocket();
+
+        // 1. Kiểm tra số dư khi Auto Trade đang bật
+        if (isTrading) {
+            const { availBal, eq } = await getAccountBalance();
+            log(`💰 [OKX ACCOUNT] Số dư khả dụng: ${availBal.toFixed(2)} USDT | Tổng tài sản: ${eq.toFixed(2)} USDT`);
+
+            if (availBal < capitalPerTrade) {
+                log(`⚠️ Số dư khả dụng (${availBal.toFixed(2)} USDT) nhỏ hơn vốn cài đặt (${capitalPerTrade} USDT). Tạm dừng mở vị thế mới!`);
+                return;
+            }
+        }
+
         const res = await axios.get(OKX_TICKERS);
         const j = res.data;
         if (!j?.data) return;
@@ -268,9 +439,9 @@ async function scanOnce() {
             const inst = t.instId;
             const last = Number(t.last);
             const dataInfo = atrPriceMap[inst] || {};
-            const { atr, price1h, volAvg1h } = dataInfo;
+            const { atr, price1h } = dataInfo;
 
-            if (!last || !price1h) continue;
+            if (!last || !price1h || !atr) continue;
 
             const delta = (last - price1h) / price1h * 100;
             const side = delta > 0 ? 'buy' : 'sell';
@@ -278,7 +449,7 @@ async function scanOnce() {
 
             candidates.push({
                 instId: inst, last, price1h, delta, delta24h: t.delta24h,
-                atr, tp, sl, side, tradeCase: side === 'buy' ? "Uptrend 📈" : "Downtrend 📉"
+                atr, tp, sl, side
             });
         }
 
@@ -308,7 +479,10 @@ async function masterFlow(qualityCandidates) {
         const openPositions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
         const openIds = new Set(openPositions.map(p => p.instId));
 
-        if (openIds.size >= 10) return;
+        if (openIds.size >= 10) {
+            log('⚠️ Đã đạt giới hạn tối đa 10 vị thế song song.');
+            return;
+        }
 
         const currentHour = new Date().getHours();
         if (currentHour >= 22 || currentHour < 5) {
@@ -320,32 +494,11 @@ async function masterFlow(qualityCandidates) {
             if (openIds.size >= 10) break;
             if (openIds.has(p.instId)) continue;
 
-            const sideLower = String(p.side).toLowerCase();
-            const posSide = sideLower === 'buy' ? 'long' : 'short';
-
-            const res = await okxApiRequest('/trade/order', 'POST', {
-                instId: p.instId,
-                tdMode: 'cross',
-                side: sideLower,
-                posSide: posSide,
-                ordType: 'market',
-                sz: '1', // Có thể tùy chỉnh số lượng dựa vào vốn
-                attachAlgoOrds: [
-                    { algoOrdType: 'take_profit', tpTriggerPx: p.tp.toFixed(4), tpOrdPx: '-1' },
-                    { algoOrdType: 'stop_loss', slTriggerPx: p.sl.toFixed(4), slOrdPx: '-1' }
-                ]
-            });
-
-            if (res?.code === '0') {
-                activeOrders[p.instId] = {
-                    instId: p.instId, side: sideLower.toUpperCase(), posSide, entry: p.last, tp: p.tp, sl: p.sl
-                };
-                log(`✅ Đã mở lệnh ${p.instId} (${posSide.toUpperCase()})`);
-                sendTelegram(`🚀 **BOT VÀO LỆNH:** ${p.instId} | Side: ${posSide.toUpperCase()} | Entry: ${p.last}`);
-            }
+            // Tiến hành mở lệnh với logic chuẩn
+            await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
         }
     } catch (e) {
-        console.error('Lỗi masterFlow:', e.message);
+        log('Lỗi masterFlow: ' + e.message);
     }
 }
 
@@ -359,18 +512,19 @@ async function monitorOrders() {
 
         for (const id in activeOrders) {
             if (!runningInstIds.includes(id)) {
+                log(`🔔 Vị thế ${id} đã được đóng (dính TP/SL hoặc đóng tay).`);
                 delete activeOrders[id];
             }
         }
     } catch (e) {
-        console.error("Lỗi Monitor:", e.message);
+        // Monitor error
     }
 }
 
 /* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
 function setTradingState(state) {
     isTrading = Boolean(state);
-    log(`Trạng thái Auto Trade: ${isTrading ? 'ON 🟢' : 'OFF 🔴'}`);
+    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢 (Đang chạy ngầm)' : 'TẮT 🔴'}`);
     return isTrading;
 }
 
