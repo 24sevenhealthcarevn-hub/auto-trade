@@ -189,187 +189,172 @@ function calcTP_SL(last, atr, isPump){
 // Đồng bộ trạng thái từ Server Render (`botEngine.js`)
 async function scanOnce(){
   if(isScanning) return;
-  
+
   isScanning = true;
+
   const scanBtn = document.getElementById('scanNow');
+  const status = document.getElementById('status');
+
   scanBtn.disabled = true;
   scanBtn.textContent = '⏳ Đang đồng bộ Server...';
-  
-  const status = document.getElementById('status');
-  status.textContent = '⏳ Đang đồng bộ dữ liệu từ Server...';
+  status.textContent = '⏳ Đang đồng bộ Top 5 Pump/Dump...';
 
   try {
-    const res = await fetch('/api/bot/status');
+
+    const res = await fetch('/api/bot/status', {
+      cache: 'no-store'
+    });
+
+    if(!res.ok){
+      throw new Error(`HTTP ${res.status}`);
+    }
+
     const data = await res.json();
-    
-    if (data.ok || data.success) {
 
-      /*
-       * KHÔNG thay toàn bộ Top 5 mỗi lần scan.
-       * Chỉ khởi tạo danh sách khi chưa có dữ liệu.
-       * Sau đó giữ nguyên 5 Pump + 5 Dump.
-       */
-      if (!topPump.length && Array.isArray(data.topPump)) {
-        topPump = data.topPump.slice(0, 5);
-      }
+    if(!(data.ok || data.success)){
+      throw new Error('Server trả về trạng thái lỗi');
+    }
 
-      if (!topDump.length && Array.isArray(data.topDump)) {
-        topDump = data.topDump.slice(0, 5);
-      }
+    /*
+     * ============================================================
+     * TOP 5 PUMP / TOP 5 DUMP
+     * Backend là nguồn dữ liệu chính.
+     * KHÔNG giữ dữ liệu cũ ở frontend.
+     * KHÔNG tự slice / tự ranking / tự khóa danh sách.
+     * ============================================================
+     */
 
-      activeOrders = data.activeOrders || {};
+    if(Array.isArray(data.topPump)){
+      topPump = data.topPump.slice(0, 5);
+    }else{
+      topPump = [];
+    }
 
-      /*
-       * Đồng bộ giá + Delta 1H từ Server cho
-       * ĐÚNG các coin đang nằm trong Top 5.
-       * Không thay đổi vị trí / thứ tự / danh sách.
-       */
-      [...(data.topPump || []), ...(data.topDump || [])].forEach(item => {
+    if(Array.isArray(data.topDump)){
+      topDump = data.topDump.slice(0, 5);
+    }else{
+      topDump = [];
+    }
 
-        const inst = typeof item === 'string'
+    /*
+     * ============================================================
+     * ACTIVE ORDERS
+     * ============================================================
+     */
+
+    activeOrders = data.activeOrders || {};
+
+    /*
+     * ============================================================
+     * ĐỒNG BỘ POSITIONS
+     * Chỉ hiển thị đúng các coin đang nằm trong
+     * Top 5 Pump + Top 5 Dump từ Server.
+     * ============================================================
+     */
+
+    const serverTop = [
+      ...topPump,
+      ...topDump
+    ];
+
+    const serverInstIds = new Set();
+
+    serverTop.forEach(item => {
+
+      const inst =
+        typeof item === 'string'
           ? item
           : (item?.instId || '');
 
-        if (!inst) return;
+      if(!inst) return;
 
-        const current =
-          [...topPump, ...topDump].find(
-            x => String(
-              typeof x === 'string'
-                ? x
-                : x?.instId
-            ) === inst
-          );
+      serverInstIds.add(inst);
 
-        if (!current) return;
+      const itemObj =
+        typeof item === 'object'
+          ? item
+          : {
+              instId: inst
+            };
 
-        if (typeof current === 'object' && typeof item === 'object') {
+      if(!positions[inst]){
 
-          if (item.last !== undefined) {
-            current.last = item.last;
-          }
+        positions[inst] = {
+          inst,
+          base: String(inst).split('-')[0],
+          last: itemObj.last || 0,
+          delta: itemObj.delta || 0,
+          status: itemObj.status || 'open',
+          hasOrder: !!activeOrders[inst]
+        };
 
-          if (item.delta !== undefined) {
-            current.delta = item.delta;
-          }
+      }else{
 
-          if (item.delta24h !== undefined) {
-            current.delta24h = item.delta24h;
-          }
+        /*
+         * Chỉ cập nhật dữ liệu.
+         * Không đổi vị trí.
+         */
 
-          if (item.vol24h !== undefined) {
-            current.vol24h = item.vol24h;
-          }
-
-          if (item.price1h !== undefined) {
-            current.price1h = item.price1h;
-          }
-
-          if (item.atr !== undefined) {
-            current.atr = item.atr;
-          }
-
-          if (item.tp !== undefined) {
-            current.tp = item.tp;
-          }
-
-          if (item.sl !== undefined) {
-            current.sl = item.sl;
-          }
-
-          if (item.status !== undefined) {
-            current.status = item.status;
-          }
-
-          if (item.closed !== undefined) {
-            current.closed = item.closed;
-          }
+        if(itemObj.last !== undefined){
+          positions[inst].last = itemObj.last;
         }
-      });
 
-      /*
-       * Xây dựng lại bảng positions nhưng CHỈ từ
-       * Top 5 Pump + Top 5 Dump hiện tại.
-       */
-      [...topPump, ...topDump].forEach(item => {
-
-        const inst =
-          typeof item === 'string'
-            ? item
-            : (item?.instId || '');
-
-        if (!inst) return;
-
-        if (!positions[inst]) {
-
-          positions[inst] = {
-            inst,
-            base: String(inst).split('-')[0],
-            last:
-              typeof item === 'object'
-                ? (item.last || 0)
-                : 0,
-            delta:
-              typeof item === 'object'
-                ? (item.delta || 0)
-                : 0,
-            status: 'open',
-            hasOrder:
-              activeOrders[inst]
-                ? true
-                : false
-          };
-
-        } else {
-
-          positions[inst].hasOrder =
-            activeOrders[inst]
-              ? true
-              : false;
-
-          if (typeof item === 'object') {
-
-            if (item.last !== undefined) {
-              positions[inst].last =
-                item.last;
-            }
-
-            if (item.delta !== undefined) {
-              positions[inst].delta =
-                item.delta;
-            }
-
-            if (item.status !== undefined) {
-              positions[inst].status =
-                item.status;
-            }
-          }
+        if(itemObj.delta !== undefined){
+          positions[inst].delta = itemObj.delta;
         }
-      });
 
-      status.textContent =
-        `✅ Đồng bộ thành công: ${
-          new Date().toLocaleTimeString()
-        }`;
+        if(itemObj.status !== undefined){
+          positions[inst].status = itemObj.status;
+        }
 
-      /*
-       * Đây là số coin đang HIỂN THỊ:
-       * 5 Pump + 5 Dump = 10.
-       * Không phải số lượng coin đã scan.
-       */
-      document.getElementById('symbolsCount').innerText =
-        `Số cặp: ${
-          topPump.length + topDump.length
-        }`;
+        positions[inst].hasOrder =
+          !!activeOrders[inst];
+      }
+    });
 
-      renderAll();
+    /*
+     * ============================================================
+     * XÓA COIN KHÔNG CÒN TRONG TOP 5 PUMP/DUMP
+     * nhưng KHÔNG xóa coin đang có lệnh thật.
+     * ============================================================
+     */
+
+    Object.keys(positions).forEach(inst => {
+
+      if(
+        !serverInstIds.has(inst) &&
+        !activeOrders[inst]
+      ){
+        delete positions[inst];
+      }
+
+    });
+
+    /*
+     * ============================================================
+     * HIỂN THỊ
+     * ============================================================
+     */
+
+    document.getElementById('symbolsCount').innerText =
+      `Số cặp: ${topPump.length + topDump.length}`;
+
+    status.textContent =
+      `✅ Top ${topPump.length} Pump + Top ${topDump.length} Dump — ` +
+      `${new Date().toLocaleTimeString()}`;
+
+    /*
+     * Render UI
+     */
+
+    renderAll();
+
+    /*
+     * Cập nhật WS frontend nếu đang sử dụng
+     */
+
+    if(typeof updateWSSubscriptions === 'function'){
       updateWSSubscriptions();
-
-    } else {
-
-      throw new Error(
-        'Server trả về trạng thái lỗi'
-      );
     }
 
   } catch(err){
@@ -387,9 +372,7 @@ async function scanOnce(){
     isScanning = false;
 
     scanBtn.disabled = false;
-
-    scanBtn.textContent =
-      '🔄 Quét ngay';
+    scanBtn.textContent = '🔄 Làm mới';
 
     startCountdown();
   }
