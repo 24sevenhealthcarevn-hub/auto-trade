@@ -541,12 +541,26 @@ async function scanOnce(){
     const res = await fetch('/api/bot/status');
     const data = await res.json();
     
-    if (data.ok || data.success) {
-      topPump = data.topPump || data.pump || data.topGainers || [];
-      topDump = data.topDump || data.dump || data.topLosers || [];
-      activeOrders = data.activeOrders || {};
+    // In log dữ liệu trả về từ server để kiểm tra F12 nếu cần
+    console.log("Server status response:", data);
+    
+    if (data) {
+      // Hỗ trợ hứng tối đa mọi tên biến mà server có thể trả về
+      let rawPump = data.topPump || data.pump || data.topGainers || data.gainers || data.data?.topPump || [];
+      let rawDump = data.topDump || data.dump || data.topLosers || data.losers || data.data?.topDump || [];
       
-      // 1. Lấy dữ liệu ticker chung của OKX để bổ sung Vol24h
+      // Nếu server trả về mảng dưới dạng object hoặc string thuần túy
+      topPump = Array.isArray(rawPump) ? rawPump : [];
+      topDump = Array.isArray(rawDump) ? rawDump : [];
+      activeOrders = data.activeOrders || data.orders || {};
+      
+      // Nếu server trả về mảng rỗng, thử lấy trực tiếp từ data nếu nó là mảng các cặp coin
+      if(topPump.length === 0 && Array.isArray(data)) {
+        topPump = data.slice(0, 5);
+        topDump = data.slice(5, 10);
+      }
+
+      // 1. Lấy dữ liệu ticker chung của OKX để bổ sung giá và Vol24h dự phòng
       let tickerMap = {};
       try {
         const tickRes = await fetch(OKX_TICKERS);
@@ -559,20 +573,35 @@ async function scanOnce(){
       } catch(e) {}
 
       // 2. Xây dựng lại bảng positions và đồng thời tính ATR, TP/SL, Vol24h
-      for (const item of [...topPump, ...topDump]) {
-        const inst = typeof item === 'string' ? item : (item?.instId || item?.symbol || '');
+      const allItems = [...topPump, ...topDump];
+      for (const item of allItems) {
+        const inst = typeof item === 'string' ? item : (item?.instId || item?.symbol || item?.coin || '');
         if (!inst) continue;
 
-        const isPump = topPump.includes(item) || topPump.some(p => (typeof p === 'string' ? p : p.instId) === inst);
+        const isPump = topPump.includes(item) || topPump.some(p => (typeof p === 'string' ? p : p.instId || p.symbol) === inst);
         const tickInfo = tickerMap[inst] || {};
-        const lastPrice = typeof item === 'object' ? (item.last || item.price || Number(tickInfo.last || 0)) : Number(tickInfo.last || 0);
-        const vol24h = tickInfo.vol24h || tickInfo.volCcy24h || (typeof item === 'object' ? item.vol24h : 0);
+        
+        let lastPrice = 0;
+        if (typeof item === 'object') {
+          lastPrice = Number(item.last || item.price || item.close || tickInfo.last || 0);
+        } else {
+          lastPrice = Number(tickInfo.last || 0);
+        }
+
+        const vol24h = tickInfo.vol24h || tickInfo.volCcy24h || (typeof item === 'object' ? (item.vol24h || item.volume) : 0) || 0;
 
         // Lấy ATR và giá 1h để tính TP/SL chuẩn xác
         const atrData = await fetchATR_Price1h(inst);
         const price1h = atrData.price1h || lastPrice;
         const atr = atrData.atr || 0.0001;
-        const delta = typeof item === 'object' && item.delta !== undefined ? item.delta : ((lastPrice - price1h) / price1h * 100);
+        
+        let delta = 0;
+        if (typeof item === 'object' && (item.delta !== undefined || item.change !== undefined)) {
+          delta = Number(item.delta ?? item.change);
+        } else if (price1h > 0 && lastPrice > 0) {
+          delta = ((lastPrice - price1h) / price1h * 100);
+        }
+
         const tpSl = calcTP_SL(lastPrice, atr, isPump);
 
         if (!positions[inst]) {
@@ -599,12 +628,12 @@ async function scanOnce(){
       }
 
       status.textContent = `✅ Đồng bộ thành công: ${new Date().toLocaleTimeString()}`;
-      document.getElementById('symbolsCount').innerText = `Số cặp: ${Object.keys(positions).length}`;
+      document.getElementById('symbolsCount').innerText = `Số cặp: ${allItems.length}`;
       
       renderAll();
       updateWSSubscriptions();
     } else {
-      throw new Error('Server trả về trạng thái lỗi');
+      throw new Error('Server trả về dữ liệu trống');
     }
   } catch(err){
     status.textContent = '❌ Lỗi đồng bộ Server';
