@@ -190,7 +190,7 @@ app.post('/api/bot/toggle', (req, res) => {
   });
 });
 
-// 4. Lấy trạng thái BOT và đồng bộ với Frontend
+// 4. Lấy trạng thái BOT và đồng bộ với Frontend (Đã bổ sung topPump và topDump ở đây)
 app.get(['/api/autotrade/status', '/api/bot/status'], (req, res) => {
   const isRunning = botEngine.getTradingState();
   res.json({
@@ -198,6 +198,8 @@ app.get(['/api/autotrade/status', '/api/bot/status'], (req, res) => {
     success: true,
     running: isRunning,
     isTrading: isRunning,
+    topPump: botEngine.topPump || [],   // <--- Bổ sung cấp dữ liệu Top 5 Pump cho Dashboard
+    topDump: botEngine.topDump || [],   // <--- Bổ sung cấp dữ liệu Top 5 Dump cho Dashboard
     activeOrders: botEngine.activeOrders || {},
     tradeHistory: botEngine.tradeHistory || []
   });
