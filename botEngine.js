@@ -270,8 +270,8 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const minSz = parseFloat(info.minSz || lotSz);
         const tickSz = parseFloat(info.tickSz || "0.0001");
         
-        const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
-        const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
+        const pPrec = String(tickSz).includes('.') ? String(tickSz).split('.')[1].length : 0;
+        const qPrec = String(info.lotSz).includes('.') ? String(info.lotSz).split('.')[1].length : 0;
 
         let currentLeverage = defaultLeverage;
         let qtyStr = "";
