@@ -1,5 +1,5 @@
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX SAFE
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -13,6 +13,7 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
+// Dán trực tiếp thông tin API OKX vào đây:
 const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
 const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
 const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
@@ -22,13 +23,15 @@ let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-let capitalPerTrade = 10;
-let defaultLeverage = 20;
+// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
+let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
+let defaultLeverage = 20;  // Đòn bẩy mặc định
 
 let ws = null;
 let wsSubscribed = new Set();
 let isWsReconnecting = false;
 
+// Trạng thái lưu trên RAM
 let activeOrders = {};
 let tradeHistory = [];
 let atrCache = {};
@@ -41,6 +44,7 @@ let topDump = [];
 const log = msg => {
     const formattedMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
     console.log(formattedMsg);
+    // Phát log tới server.js để gửi về giao diện Web nếu có callback
     if (global.broadcastLog && typeof global.broadcastLog === 'function') {
         global.broadcastLog(formattedMsg);
     }
@@ -57,7 +61,9 @@ async function sendTelegram(message) {
             text: message,
             parse_mode: 'HTML'
         });
-    } catch (e) {}
+    } catch (e) {
+        // Bỏ qua lỗi gửi Telegram
+    }
 }
 
 /* ================== API CORE ================== */
@@ -71,6 +77,10 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
+    const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+    const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+    const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+
     if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
         return null;
@@ -135,7 +145,7 @@ function initWebSocket() {
             if (!msg?.data) return;
 
             for (const d of msg.data) {
-                const inst = String(d.instId || '');
+                const inst = d.instId;
                 const last = Number(d.last);
                 if (!isFinite(last)) continue;
 
@@ -155,7 +165,9 @@ function initWebSocket() {
                     activeOrders[inst].last = last;
                 }
             }
-        } catch (err) {}
+        } catch (err) {
+            // Bỏ qua lỗi parse
+        }
     });
 
     ws.on('close', () => {
@@ -163,7 +175,9 @@ function initWebSocket() {
         autoReconnectWS();
     });
 
-    ws.on('error', (err) => {});
+    ws.on('error', (err) => {
+        // WS error
+    });
 }
 
 function autoReconnectWS() {
@@ -178,10 +192,9 @@ function autoReconnectWS() {
 function subscribeWS(instIds) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         for (const instId of instIds) {
-            const strInst = String(instId);
-            if (wsSubscribed.has(strInst)) continue;
-            ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'tickers', instId: strInst }] }));
-            wsSubscribed.add(strInst);
+            if (wsSubscribed.has(instId)) continue;
+            ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'tickers', instId }] }));
+            wsSubscribed.add(instId);
         }
     }
 }
@@ -203,12 +216,11 @@ async function getAccountBalance() {
 
 async function fetchATR_Price1h(instId) {
     try {
-        const strInst = String(instId);
         const now = Date.now();
-        const cached = atrCache[strInst];
+        const cached = atrCache[instId];
         if (cached && now - cached.ts < ATR_CACHE_TTL) return cached.data;
 
-        const resCandles = await axios.get(`${OKX_API_BASE}/market/history-candles?instId=${strInst}&bar=1H&limit=30`);
+        const resCandles = await axios.get(`${OKX_API_BASE}/market/history-candles?instId=${instId}&bar=1H&limit=30`);
         const j = resCandles.data;
 
         if (!Array.isArray(j.data) || j.data.length < 20) return null;
@@ -228,11 +240,11 @@ async function fetchATR_Price1h(instId) {
         const atr = trSum / 14;
         const volAvg1h = candlesRaw.slice(1, 11).reduce((sum, c) => sum + c.vol, 0) / 10;
 
-        const data = { instId: strInst, atr, price1h, volAvg1h };
-        atrCache[strInst] = { ts: now, data };
+        const data = { instId, atr, price1h, volAvg1h };
+        atrCache[instId] = { ts: now, data };
         return data;
     } catch (err) {
-        return atrCache[String(instId)]?.data || null;
+        return atrCache[instId]?.data || null;
     }
 }
 
@@ -242,15 +254,14 @@ function calcTP_SL(last, atr, isLong) {
     return { tp, sl };
 }
 
-/* ================== ORDER EXECUTION ================== */
+/* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-        const strInst = String(instId);
-        const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${strInst}`);
+        const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
         const instRes = await res.json();
         const info = instRes?.data?.[0];
         if (!info) {
-            log(`❌ Không lấy được thông tin instrument cho ${strInst}`);
+            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
             return null;
         }
 
@@ -259,8 +270,8 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const minSz = parseFloat(info.minSz || lotSz);
         const tickSz = parseFloat(info.tickSz || "0.0001");
         
-        const pPrec = String(tickSz).includes('.') ? String(tickSz).split('.')[1].length : 0;
-        const qPrec = String(info.lotSz).includes('.') ? String(info.lotSz).split('.')[1].length : 0;
+        const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
+        const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
         let currentLeverage = defaultLeverage;
         let qtyStr = "";
@@ -268,7 +279,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
 
         while (currentLeverage >= 10) {
             const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
-                instId: strInst,
+                instId,
                 lever: currentLeverage.toString(),
                 mgnMode: 'cross'
             });
@@ -278,7 +289,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
                 let qty = Math.floor(rawQty / lotSz) * lotSz;
 
                 if (qty < minSz) {
-                    log(`⚠️ ${strInst}: Vốn không đủ mở vị thế tối thiểu.`);
+                    log(`⚠️ ${instId}: Vốn ${capitalPerTrade} USDT không đủ để mở vị thế tối thiểu (${minSz} lot).`);
                     return null;
                 }
 
@@ -291,7 +302,10 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
                 else if (currentLeverage > 20) currentLeverage = 20;
                 else if (currentLeverage > 10) currentLeverage = 10;
                 else break;
+
+                log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x do giới hạn OKX`);
             } else {
+                log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
                 return null;
             }
         }
@@ -302,15 +316,25 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const slStr = slPrice.toFixed(pPrec);
 
         const attachAlgoOrds = [
-            { "algoOrdType": "take_profit", "sz": qtyStr, "tpTriggerPx": tpStr, "tpOrdPx": "-1" },
-            { "algoOrdType": "stop_loss", "sz": qtyStr, "slTriggerPx": slStr, "slOrdPx": "-1" }
+            {
+                "algoOrdType": "take_profit",
+                "sz": qtyStr,
+                "tpTriggerPx": tpStr,
+                "tpOrdPx": "-1"
+            },
+            {
+                "algoOrdType": "stop_loss",
+                "sz": qtyStr,
+                "slTriggerPx": slStr,
+                "slOrdPx": "-1"
+            }
         ];
 
-        const sideLower = String(side).toLowerCase();
+        const sideLower = side.toLowerCase();
         const posSide = sideLower === 'buy' ? 'long' : 'short';
 
         const orderResult = await okxApiRequest('/trade/order', 'POST', {
-            instId: strInst,
+            instId,
             tdMode: 'cross',
             side: sideLower,
             ordType: 'market',
@@ -325,13 +349,34 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
             const notional = quantity * price * ctVal;
             const margin = notional / currentLeverage;
 
-            log(`✅ MỞ LỆNH THÀNH CÔNG ${strInst}`);
-            const orderInfo = { id: orderId, instId: strInst, side: sideLower, price, quantity, slPrice, tpPrice, status: 'open' };
-            activeOrders[strInst] = orderInfo;
+            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
+            log(successLog);
+            sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
+
+            const orderInfo = {
+                id: orderId,
+                instId,
+                side: sideLower,
+                price,
+                quantity,
+                slPrice,
+                tpPrice,
+                capital: capitalPerTrade,
+                leverage: currentLeverage,
+                margin,
+                notional,
+                timestamp: Date.now(),
+                status: 'open'
+            };
+
+            activeOrders[instId] = orderInfo;
             return orderInfo;
+        } else {
+            log(`❌ Lỗi đặt lệnh ${instId}: ${orderResult?.msg || 'Lỗi không xác định'}`);
+            return null;
         }
-        return null;
     } catch (err) {
+        log(`❌ Ngoại lệ khi đặt lệnh ${instId}: ${err.message}`);
         return null;
     }
 }
@@ -349,63 +394,95 @@ async function scanOnce() {
         initWebSocket();
 
         if (isTrading) {
-            const { availBal } = await getAccountBalance();
-            if (availBal < capitalPerTrade) return;
+            const { availBal, eq } = await getAccountBalance();
+            log(`💰 [OKX ACCOUNT] Số dư khả dụng: ${availBal.toFixed(2)} USDT | Tổng tài sản: ${eq.toFixed(2)} USDT`);
+
+            if (availBal < capitalPerTrade) {
+                log(`⚠️ Số dư khả dụng (${availBal.toFixed(2)} USDT) nhỏ hơn vốn cài đặt (${capitalPerTrade} USDT). Tạm dừng mở vị thế mới!`);
+                isScanning = false;
+                return;
+            }
         }
 
         const res = await axios.get(OKX_TICKERS);
         const j = res.data;
-        if (!j?.data) return;
+        if (!j?.data) {
+            isScanning = false;
+            return;
+        }
 
+        // Bước 1 & 2: Scan toàn sàn và chuẩn bị danh sách lấy dữ liệu nến 1H để tính Delta 1H
         const rawTickers = j.data
-            .filter(t => t.instId && String(t.instId).endsWith('-SWAP') && String(t.instId).includes('USDT'))
-            .filter(t => !EXCLUDE_PREFIXES.some(ex => String(t.instId).startsWith(ex)))
-            .map(t => {
-                const last = parseFloat(t.last || 0);
-                const open24h = parseFloat(t.open24h || t.sodUtc0 || last);
-                const delta24h = open24h > 0 ? ((last - open24h) / open24h) * 100 : 0;
-                return { ...t, instId: String(t.instId), last, delta24h };
-            });
+            .filter(t => t.instId.endsWith('-SWAP') && t.instId.includes('USDT'))
+            .filter(t => !EXCLUDE_PREFIXES.some(ex => t.instId.startsWith(ex)))
+            .map(t => ({
+                instId: t.instId,
+                last: parseFloat(t.last || 0)
+            }))
+            .filter(t => t.last > 0);
 
-        const top24hPump = [...rawTickers].sort((a, b) => b.delta24h - a.delta24h).slice(0, 60);
-        const top24hDump = [...rawTickers].sort((a, b) => a.delta24h - b.delta24h).slice(0, 60);
-        const top120Tickers = [...top24hPump, ...top24hDump];
-
+        // Lấy ATR và giá 1H trước đó cho toàn sàn (hoặc batch lớn) để tính Delta 1H chuẩn xác
         const atrPriceMap = {};
-        for (let i = 0; i < top120Tickers.length; i += CONCURRENCY_LIMIT) {
-            const chunk = top120Tickers.slice(i, i + CONCURRENCY_LIMIT);
+        for (let i = 0; i < rawTickers.length; i += CONCURRENCY_LIMIT) {
+            const chunk = rawTickers.slice(i, i + CONCURRENCY_LIMIT);
             const rs = await Promise.all(chunk.map(t => fetchATR_Price1h(t.instId)));
             rs.forEach(r => { if (r?.instId) atrPriceMap[r.instId] = r; });
-            if (i + CONCURRENCY_LIMIT < top120Tickers.length) await sleep(800);
+            if (i + CONCURRENCY_LIMIT < rawTickers.length) await sleep(300);
         }
 
-        const candidates = [];
-        for (const t of top120Tickers) {
-            const inst = String(t.instId);
-            const last = Number(t.last);
-            const dataInfo = atrPriceMap[inst] || {};
-            const { atr, price1h } = dataInfo;
+        // Tính Delta 1H cho tất cả coin trên sàn
+        const allCandidates = [];
+        for (const t of rawTickers) {
+            const dataInfo = atrPriceMap[t.instId];
+            if (!dataInfo || !dataInfo.price1h || !dataInfo.atr) continue;
 
-            if (!last || !price1h || !atr) continue;
-
-            const delta = (last - price1h) / price1h * 100;
-            const side = delta > 0 ? 'buy' : 'sell';
+            const last = t.last;
+            const { price1h, atr } = dataInfo;
+            const delta1h = ((last - price1h) / price1h) * 100;
+            const side = delta1h > 0 ? 'buy' : 'sell';
             const { tp, sl } = calcTP_SL(last, atr, side === 'buy');
 
-            candidates.push({
-                instId: inst, last, price1h, delta, delta24h: t.delta24h,
-                atr, tp, sl, side
+            allCandidates.push({
+                instId: t.instId,
+                last,
+                price1h,
+                delta: delta1h,
+                atr,
+                tp,
+                sl,
+                side
             });
         }
 
-        topPump = candidates.filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, TOP_N);
-        topDump = candidates.filter(x => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, TOP_N);
+        // Bước 3: Sort theo Delta 1H -> Lấy TOP 120 -> Lọc ra TOP 5 Pump & TOP 5 Dump
+        allCandidates.sort((a, b) => b.delta - a.delta);
+        const top120 = allCandidates.slice(0, 120);
+
+        topPump = [...top120].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, TOP_N);
+        topDump = [...top120].filter(x => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, TOP_N);
 
         subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
+        // Bước 4: Kiểm tra điều kiện và thực hiện đặt lệnh (Tối đa 10 vị thế)
         if (isTrading) {
-            const qualityCandidates = [...topPump, ...topDump].filter(c => !activeOrders[c.instId]);
-            await masterFlow(qualityCandidates);
+            const qualityCandidates = [...topPump, ...topDump]
+                .filter(c => !activeOrders[c.instId]);
+
+            for (const p of qualityCandidates) {
+                if (Object.keys(activeOrders).length >= 10) break;
+
+                const order = await placeOrder(
+                    p.instId,
+                    p.side,
+                    p.last,
+                    p.sl,
+                    p.tp
+                );
+
+                if (order) {
+                    activeOrders[p.instId] = order;
+                }
+            }
         }
     } catch (err) {
         log('Lỗi scan: ' + err.message);
@@ -414,44 +491,30 @@ async function scanOnce() {
     }
 }
 
-async function masterFlow(qualityCandidates) {
-    if (!isTrading) return;
-    try {
-        const posRes = await okxApiRequest('/account/positions?instType=SWAP');
-        if (!posRes || posRes.code !== '0') return;
-
-        const openPositions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
-        const openIds = new Set(openPositions.map(p => String(p.instId)));
-
-        if (openIds.size >= 10) return;
-
-        for (const p of qualityCandidates) {
-            if (openIds.size >= 10) break;
-            if (openIds.has(p.instId)) continue;
-            await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
-        }
-    } catch (e) {}
-}
-
+/* ================== MONITOR ORDERS (ĐỒNG BỘ VỊ THẾ) ================== */
 async function monitorOrders() {
     try {
         const posRes = await okxApiRequest('/account/positions?instType=SWAP');
         if (!posRes || posRes.code !== '0') return;
 
         const positions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
-        const runningInstIds = positions.map(p => String(p.instId));
+        const runningInstIds = positions.map(p => p.instId);
 
         for (const id in activeOrders) {
             if (!runningInstIds.includes(id)) {
+                log(`🔔 Vị thế ${id} đã được đóng (dính TP/SL hoặc đóng trên sàn). Xóa activeOrders để nhường chỗ cho vòng scan sau.`);
                 delete activeOrders[id];
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        // Monitor error
+    }
 }
 
+/* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
 function setTradingState(state) {
     isTrading = Boolean(state);
-    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢' : 'TẮT 🔴'}`);
+    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢 (Đang chạy ngầm)' : 'TẮT 🔴'}`);
     return isTrading;
 }
 
@@ -459,6 +522,7 @@ function getTradingState() {
     return isTrading;
 }
 
+/* ================== BOT CYCLE METHOD FOR SERVER.JS ================== */
 async function runBotCycle() {
     await monitorOrders();
     await scanOnce();
