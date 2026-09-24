@@ -454,12 +454,29 @@ async function scanOnce() {
             });
         }
 
-        // Bước 3: Tách biệt độc lập Top Pump và Top Dump để không bị trống bảng Dump
+        // Bước 3: Giữ cố định Top 5 đang chạy lệnh/theo dõi, chỉ thay thế coin mới khi hoàn thành TP/SL
         const sortedByPump = [...allCandidates].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
         const sortedByDump = [...allCandidates].filter(x => x.delta < 0).sort((a, b) => b.delta - a.delta);
 
-        topPump = sortedByPump.slice(0, TOP_N);
-        topDump = sortedByDump.slice(0, TOP_N);
+        let keptPump = topPump.filter(p => activeOrders[p.instId] || p.status === 'open');
+        let keptDump = topDump.filter(d => activeOrders[d.instId] || d.status === 'open');
+
+        for (const p of sortedByPump) {
+            if (keptPump.length >= TOP_N) break;
+            if (!keptPump.some(existing => existing.instId === p.instId)) {
+                keptPump.push(p);
+            }
+        }
+
+        for (const d of sortedByDump) {
+            if (keptDump.length >= TOP_N) break;
+            if (!keptDump.some(existing => existing.instId === d.instId)) {
+                keptDump.push(d);
+            }
+        }
+
+        topPump = keptPump.slice(0, TOP_N);
+        topDump = keptDump.slice(0, TOP_N);
 
         subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
