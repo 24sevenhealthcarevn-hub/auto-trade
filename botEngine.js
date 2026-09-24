@@ -23,7 +23,7 @@ let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
+// Cấu hình giao dịch (Sẽ nhận trực tiếp từ giao diện Web thông qua server.js)
 let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
 let defaultLeverage = 20;  // Đòn bẩy mặc định
 
@@ -349,7 +349,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
             const notional = quantity * price * ctVal;
             const margin = notional / currentLeverage;
 
-            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
+            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x, Vốn ${capitalPerTrade} USDT)`;
             log(successLog);
             sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
 
@@ -454,16 +454,16 @@ async function scanOnce() {
             });
         }
 
-        // Bước 3: Sort theo Delta 1H -> Lấy TOP 120 -> Lọc ra TOP 5 Pump & TOP 5 Dump
-        allCandidates.sort((a, b) => b.delta - a.delta);
-        const top120 = allCandidates.slice(0, 120);
+        // Bước 3: Tách biệt độc lập Top Pump và Top Dump để không bị trống bảng Dump
+        const sortedByPump = [...allCandidates].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
+        const sortedByDump = [...allCandidates].filter(x => x.delta < 0).sort((a, b) => b.delta - a.delta);
 
-        topPump = [...top120].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, TOP_N);
-        topDump = [...top120].filter(x => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, TOP_N);
+        topPump = sortedByPump.slice(0, TOP_N);
+        topDump = sortedByDump.slice(0, TOP_N);
 
         subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
-        // Bước 4: Kiểm tra điều kiện và thực hiện đặt lệnh (Tối đa 10 vị thế)
+        // Bước 4: Kiểm tra điều kiện và thực hiện đặt lệnh (Tối đa 10 vị thế - chỉ chạy khi bật Auto Trade)
         if (isTrading) {
             const qualityCandidates = [...topPump, ...topDump]
                 .filter(c => !activeOrders[c.instId]);
@@ -511,7 +511,7 @@ async function monitorOrders() {
     }
 }
 
-/* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
+/* ================== QUẢN LÝ TRẠNG THÁI & CẤU HÌNH ================== */
 function setTradingState(state) {
     isTrading = Boolean(state);
     log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢 (Đang chạy ngầm)' : 'TẮT 🔴'}`);
@@ -520,6 +520,19 @@ function setTradingState(state) {
 
 function getTradingState() {
     return isTrading;
+}
+
+// Nhận cấu hình Vốn và Đòn bẩy từ giao diện Web (thông qua server.js)
+function setTradingConfig(config) {
+    if (config) {
+        if (config.capital !== undefined) {
+            capitalPerTrade = parseFloat(config.capital) || 10;
+        }
+        if (config.leverage !== undefined) {
+            defaultLeverage = parseInt(config.leverage) || 20;
+        }
+        log(`⚙️ Đã cập nhật cấu hình mới -> Vốn mỗi lệnh: ${capitalPerTrade} USDT | Đòn bẩy: ${defaultLeverage}x`);
+    }
 }
 
 /* ================== BOT CYCLE METHOD FOR SERVER.JS ================== */
@@ -533,6 +546,7 @@ module.exports = {
     runBotCycle,
     setTradingState,
     getTradingState,
+    setTradingConfig,
     get activeOrders() { return activeOrders; },
     get tradeHistory() { return tradeHistory; },
     get topPump() { return topPump; },
