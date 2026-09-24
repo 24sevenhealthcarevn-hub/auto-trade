@@ -1,5 +1,5 @@
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX SAFE
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FIX ĐỦ 120+ CẶP & REALTIME
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -7,7 +7,8 @@ const WebSocket = require('ws');
 
 /* ================== CONFIG & STATE ================== */
 const OKX_API_BASE = 'https://www.okx.com/api/v5';
-const EXCLUDE_PREFIXES = ['BTC-USDT', 'ETH-USDT', 'BNB-USDT', 'USDT', 'USDC', 'FDUSD'];
+// Chỉ loại bỏ các đồng stablecoin thuần túy hoặc index lớn nếu cần, giữ lại toàn bộ các cặp altcoin SWAP
+const EXCLUDE_PREFIXES = ['USDT-USDT', 'USDC-USDC']; 
 const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
@@ -19,7 +20,7 @@ const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
 let isTrading = false;
 let isScanning = false;
-const CONCURRENCY_LIMIT = 5;
+const CONCURRENCY_LIMIT = 15; // Tăng tốc độ quét đồng thời để quét qua 120+ cặp cực nhanh
 const TOP_N = 5;
 
 let capitalPerTrade = 10;
@@ -32,8 +33,9 @@ let isWsReconnecting = false;
 let activeOrders = {};
 let tradeHistory = [];
 let atrCache = {};
-const ATR_CACHE_TTL = 5 * 60 * 1000;
+const ATR_CACHE_TTL = 10 * 60 * 1000;
 
+// Biến lưu trữ Top 5 cố định
 let topPump = [];
 let topDump = [];
 
@@ -52,46 +54,21 @@ async function sendTelegram(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     try {
-        await axios.post(url, {
-            chat_id: TELEGRAM_CHAT_ID,
-            text: message,
-            parse_mode: 'HTML'
-        });
+        await axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' });
     } catch (e) {}
 }
 
 /* ================== API CORE ================== */
-async function okxPublic(endpoint) {
-    try {
-        const res = await axios.get(OKX_API_BASE + endpoint);
-        return res.data;
-    } catch (e) {
-        return null;
-    }
-}
-
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    if (!apiKey || !secretKey || !passphrase) {
-        log("❌ Chưa cấu hình API Keys cho trading");
-        return null;
-    }
+    if (!apiKey || !secretKey || !passphrase) return null;
 
     const ts = new Date().toISOString();
     const methodUpper = method.toUpperCase();
-    const fullEndpoint = endpoint.startsWith('/api/v5')
-        ? endpoint
-        : '/api/v5' + endpoint;
-
-    const bodyStr = (methodUpper === 'GET' || !body)
-        ? ''
-        : JSON.stringify(body);
+    const fullEndpoint = endpoint.startsWith('/api/v5') ? endpoint : '/api/v5' + endpoint;
+    const bodyStr = (methodUpper === 'GET' || !body) ? '' : JSON.stringify(body);
 
     const msg = ts + methodUpper + fullEndpoint + bodyStr;
-
-    const sign = crypto
-        .createHmac('sha256', secretKey)
-        .update(msg)
-        .digest('base64');
+    const sign = crypto.createHmac('sha256', secretKey).update(msg).digest('base64');
 
     try {
         const config = {
@@ -105,56 +82,26 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
                 'Content-Type': 'application/json'
             }
         };
-
         if (bodyStr) config.data = body;
-
         const res = await axios(config);
-
-        if (res.data && res.data.code !== "0") {
-            log(
-                `⚠️ OKX API Error (${fullEndpoint}): ` +
-                `Code ${res.data.code} - ${res.data.msg}`
-            );
-        }
-
         return res.data;
-
     } catch (e) {
-        log(
-            `❌ okxApiRequest Exception: ` +
-            `${e.response ? JSON.stringify(e.response.data) : e.message}`
-        );
-
         return null;
     }
 }
 
-/* ================== WEBSOCKET ================== */
+/* ================== WEBSOCKET (REALTIME FIX) ================== */
 function initWebSocket() {
-    if (
-        ws &&
-        (
-            ws.readyState === WebSocket.OPEN ||
-            ws.readyState === WebSocket.CONNECTING
-        )
-    ) {
-        return;
-    }
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    ws = new WebSocket(
-        'wss://ws.okx.com:8443/ws/v5/public'
-    );
+    ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
 
     ws.on('open', () => {
-        log("✅ WebSocket Connected");
-
+        log("✅ WebSocket Connected (Realtime Stream)");
         isWsReconnecting = false;
-
         if (wsSubscribed.size > 0) {
             const list = Array.from(wsSubscribed);
-
             wsSubscribed.clear();
-
             subscribeWS(list);
         }
     });
@@ -162,1562 +109,348 @@ function initWebSocket() {
     ws.on('message', (data) => {
         try {
             if (data.toString() === 'pong') return;
-
             const msg = JSON.parse(data.toString());
-
             if (!msg?.data) return;
 
             for (const d of msg.data) {
-
-                const inst = String(d.instId || '');
+                const inst = d.instId;
                 const last = Number(d.last);
-
                 if (!isFinite(last)) continue;
 
-                /* ===== REALTIME PUMP ===== */
-                const pump = topPump.find(
-                    x => x.instId === inst
-                );
-
+                // Cập nhật liên tục cho Top Pump
+                const pump = topPump.find(x => x.instId === inst);
                 if (pump) {
-
                     pump.last = last;
-
-                    if (pump.price1h) {
-                        pump.delta =
-                            ((last - pump.price1h) /
-                                pump.price1h) * 100;
-                    }
-
-                    if (d.volCcy24h !== undefined) {
-                        pump.vol24h =
-                            Number(d.volCcy24h);
+                    if (pump.price1h > 0) {
+                        pump.delta = ((last - pump.price1h) / pump.price1h) * 100;
                     }
                 }
 
-                /* ===== REALTIME DUMP ===== */
-                const dump = topDump.find(
-                    x => x.instId === inst
-                );
-
+                // Cập nhật liên tục cho Top Dump
+                const dump = topDump.find(x => x.instId === inst);
                 if (dump) {
-
                     dump.last = last;
-
-                    if (dump.price1h) {
-                        dump.delta =
-                            ((last - dump.price1h) /
-                                dump.price1h) * 100;
-                    }
-
-                    if (d.volCcy24h !== undefined) {
-                        dump.vol24h =
-                            Number(d.volCcy24h);
+                    if (dump.price1h > 0) {
+                        dump.delta = ((last - dump.price1h) / dump.price1h) * 100;
                     }
                 }
 
-                /* ===== REALTIME ACTIVE ORDER ===== */
                 if (activeOrders[inst]) {
                     activeOrders[inst].last = last;
                 }
             }
-
         } catch (err) {}
     });
 
-    ws.on('close', () => {
-
-        log(
-            "⚠️ WebSocket Closed. Reconnecting in 3s..."
-        );
-
-        autoReconnectWS();
-    });
-
-    ws.on('error', (err) => {});
+    ws.on('close', () => { autoReconnectWS(); });
 }
 
 function autoReconnectWS() {
-
     if (isWsReconnecting) return;
-
     isWsReconnecting = true;
-
     setTimeout(() => {
-
         isWsReconnecting = false;
-
         initWebSocket();
-
     }, 3000);
 }
 
 function subscribeWS(instIds) {
-
-    if (
-        ws &&
-        ws.readyState === WebSocket.OPEN
-    ) {
-
-        const desired = new Set(
-            instIds
-                .map(instId =>
-                    String(instId || '')
-                )
-                .filter(instId => instId)
-        );
-
-        /* ===== UNSUBSCRIBE COIN KHÔNG CÒN TRONG TOP 10 ===== */
-
-        for (
-            const instId of Array.from(wsSubscribed)
-        ) {
-
-            if (!desired.has(instId)) {
-
-                ws.send(JSON.stringify({
-                    op: 'unsubscribe',
-                    args: [{
-                        channel: 'tickers',
-                        instId
-                    }]
-                }));
-
-                wsSubscribed.delete(instId);
-            }
-        }
-
-        /* ===== SUBSCRIBE TOP 5 PUMP + TOP 5 DUMP ===== */
-
-        for (const instId of desired) {
-
-            if (wsSubscribed.has(instId)) continue;
-
-            ws.send(JSON.stringify({
-                op: 'subscribe',
-                args: [{
-                    channel: 'tickers',
-                    instId
-                }]
-            }));
-
-            wsSubscribed.add(instId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        const args = instIds.map(instId => ({ channel: 'tickers', instId }));
+        if (args.length > 0) {
+            ws.send(JSON.stringify({ op: 'subscribe', args }));
+            instIds.forEach(id => wsSubscribed.add(id));
         }
     }
 }
 
-/* ================== DATA FETCHING & ACCOUNT ================== */
+/* ================== DATA FETCHING ================== */
 async function getAccountBalance() {
-
     try {
-
-        const res = await okxApiRequest(
-            '/account/balance?ccy=USDT',
-            'GET'
-        );
-
-        if (
-            res &&
-            res.code === '0' &&
-            res.data?.[0]?.details?.[0]
-        ) {
-
-            const availBal =
-                parseFloat(
-                    res.data[0].details[0].availBal || 0
-                );
-
-            const eq =
-                parseFloat(
-                    res.data[0].details[0].eq || 0
-                );
-
+        const res = await okxApiRequest('/account/balance?ccy=USDT', 'GET');
+        if (res && res.code === '0' && res.data?.[0]?.details?.[0]) {
             return {
-                availBal,
-                eq
+                availBal: parseFloat(res.data[0].details[0].availBal || 0),
+                eq: parseFloat(res.data[0].details[0].eq || 0)
             };
         }
-
-    } catch (err) {
-
-        log(
-            `❌ Lỗi kiểm tra số dư: ${err.message}`
-        );
-    }
-
-    return {
-        availBal: 0,
-        eq: 0
-    };
+    } catch (err) {}
+    return { availBal: 0, eq: 0 };
 }
 
 async function fetchATR_Price1h(instId) {
-
     try {
-
-        const strInst = String(instId);
-
         const now = Date.now();
+        const cached = atrCache[instId];
+        if (cached && now - cached.ts < ATR_CACHE_TTL) return cached.data;
 
-        const cached = atrCache[strInst];
-
-        if (
-            cached &&
-            now - cached.ts < ATR_CACHE_TTL
-        ) {
-            return cached.data;
-        }
-
-        const resCandles = await axios.get(
-            `${OKX_API_BASE}/market/candles` +
-            `?instId=${strInst}` +
-            `&bar=1H` +
-            `&limit=30`
-        );
-
+        const resCandles = await axios.get(`${OKX_API_BASE}/market/history-candles?instId=${instId}&bar=1H&limit=30`, { timeout: 5000 });
         const j = resCandles.data;
 
-        if (
-            !Array.isArray(j.data) ||
-            j.data.length < 16
-        ) {
-            return null;
-        }
+        if (!Array.isArray(j.data) || j.data.length < 20) return null;
 
-        const candlesRaw = j.data
-
-            .map(c => ({
-                ts: Number(c[0]),
-                open: Number(c[1]),
-                high: Number(c[2]),
-                low: Number(c[3]),
-                close: Number(c[4]),
-                vol: Number(c[5]),
-                confirm: String(
-                    c[8] ??
-                    c[6] ??
-                    '0'
-                )
-            }))
-
-            .filter(c =>
-                c.ts &&
-                c.open > 0 &&
-                c.high > 0 &&
-                c.low > 0 &&
-                c.close > 0
-            )
-
-            .sort(
-                (a, b) => a.ts - b.ts
-            );
-
-        if (candlesRaw.length < 16) {
-            return null;
-        }
-
-        /* ===== CURRENT 1H CANDLE OPEN ===== */
-
-        const current =
-            candlesRaw[
-                candlesRaw.length - 1
-            ];
-
-        const price1h =
-            current.open;
-
-        /* ===== ATR 14 ===== */
-
-        const closedCandles =
-            candlesRaw
-                .filter(
-                    c => c.confirm === '1'
-                )
-                .slice(-15);
-
-        const atrCandles =
-            closedCandles.length >= 15
-                ? closedCandles
-                : candlesRaw.slice(-16, -1);
-
-        if (atrCandles.length < 15) {
-            return null;
-        }
-
+        const candlesRaw = j.data.map(c => ({ high: +c[2], low: +c[3], close: +c[4], vol: +c[5] }));
+        const price1h = candlesRaw[1].close;
         let trSum = 0;
-
-        for (
-            let i = 1;
-            i < atrCandles.length;
-            i++
-        ) {
-
-            const h =
-                atrCandles[i].high;
-
-            const l =
-                atrCandles[i].low;
-
-            const pc =
-                atrCandles[i - 1].close;
-
-            trSum += Math.max(
-                h - l,
-                Math.abs(h - pc),
-                Math.abs(l - pc)
-            );
+        for (let i = 1; i <= 14; i++) {
+            const h = candlesRaw[i].high;
+            const l = candlesRaw[i].low;
+            const pc = candlesRaw[i + 1].close;
+            trSum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
         }
-
-        const atr =
-            trSum /
-            (atrCandles.length - 1);
-
-        const volAvg1h =
-            atrCandles
-                .slice(-10)
-                .reduce(
-                    (sum, c) =>
-                        sum + c.vol,
-                    0
-                ) / 10;
-
-        const data = {
-            instId: strInst,
-            atr,
-            price1h,
-            volAvg1h
-        };
-
-        atrCache[strInst] = {
-            ts: now,
-            data
-        };
-
+        const atr = trSum / 14;
+        const data = { instId, atr, price1h };
+        atrCache[instId] = { ts: now, data };
         return data;
-
     } catch (err) {
-
-        return (
-            atrCache[
-                String(instId)
-            ]?.data || null
-        );
+        return atrCache[instId]?.data || null;
     }
 }
 
-function calcTP_SL(
-    last,
-    atr,
-    isLong
-) {
-
-    const tp =
-        isLong
-            ? last + (atr * 2.5)
-            : last - (atr * 2.5);
-
-    const sl =
-        isLong
-            ? last - (atr * 1.5)
-            : last + (atr * 1.5);
-
-    return {
-        tp,
-        sl
-    };
+function calcTP_SL(last, atr, isLong) {
+    const tp = isLong ? last + (atr * 2.5) : last - (atr * 2.5);
+    const sl = isLong ? last - (atr * 1.5) : last + (atr * 1.5);
+    return { tp, sl };
 }
 
 /* ================== ORDER EXECUTION ================== */
-async function placeOrder(
-    instId,
-    side,
-    price,
-    slPrice,
-    tpPrice
-) {
-
+async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
+        const res = await axios.get(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`, { timeout: 4000 });
+        const info = res.data?.data?.[0];
+        if (!info) return null;
 
-        const strInst =
-            String(instId);
+        const ctVal = parseFloat(info.ctVal);
+        const lotSz = parseFloat(info.lotSz);
+        const minSz = parseFloat(info.minSz || lotSz);
+        const tickSz = parseFloat(info.tickSz || "0.0001");
+        
+        const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
+        const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
-        const res = await fetch(
-            `https://www.okx.com/api/v5/public/instruments` +
-            `?instType=SWAP` +
-            `&instId=${strInst}`
-        );
-
-        const instRes =
-            await res.json();
-
-        const info =
-            instRes?.data?.[0];
-
-        if (!info) {
-
-            log(
-                `❌ Không lấy được thông tin instrument cho ${strInst}`
-            );
-
-            return null;
-        }
-
-        const ctVal =
-            parseFloat(info.ctVal);
-
-        const lotSz =
-            parseFloat(info.lotSz);
-
-        const minSz =
-            parseFloat(
-                info.minSz || lotSz
-            );
-
-        const tickSz =
-            parseFloat(
-                info.tickSz || "0.0001"
-            );
-
-        if (
-            !ctVal ||
-            !lotSz ||
-            !minSz ||
-            !tickSz ||
-            info.state !== 'live'
-        ) {
-
-            log(
-                `❌ ${strInst}: Instrument không sẵn sàng để trade.`
-            );
-
-            return null;
-        }
-
-        const pPrec =
-            String(tickSz).includes('.')
-                ? String(tickSz)
-                    .split('.')[1].length
-                : 0;
-
-        const qPrec =
-            String(info.lotSz).includes('.')
-                ? String(info.lotSz)
-                    .split('.')[1].length
-                : 0;
-
-        let currentLeverage =
-            defaultLeverage;
-
+        let currentLeverage = defaultLeverage;
         let qtyStr = "";
-
         let leverageFixed = false;
 
-        while (
-            currentLeverage >= 10
-        ) {
+        while (currentLeverage >= 10) {
+            const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
+                instId, lever: currentLeverage.toString(), mgnMode: 'cross'
+            });
 
-            const levRes =
-                await okxApiRequest(
-                    '/account/set-leverage',
-                    'POST',
-                    {
-                        instId: strInst,
-                        lever:
-                            currentLeverage.toString(),
-                        mgnMode: 'cross'
-                    }
-                );
-
-            if (
-                levRes?.code === '0' ||
-                levRes?.code === '32115'
-            ) {
-
-                let rawQty =
-                    (
-                        capitalPerTrade *
-                        currentLeverage
-                    ) /
-                    (
-                        price *
-                        ctVal
-                    );
-
-                let qty =
-                    Math.floor(
-                        rawQty / lotSz
-                    ) * lotSz;
-
-                if (qty < minSz) {
-
-                    log(
-                        `⚠️ ${strInst}: Vốn không đủ mở vị thế tối thiểu.`
-                    );
-
-                    return null;
-                }
-
-                qtyStr =
-                    qPrec > 0
-                        ? qty.toFixed(qPrec)
-                        : String(
-                            Math.round(qty)
-                        );
-
+            if (levRes?.code === '0' || levRes?.code === '32115') {
+                let rawQty = (capitalPerTrade * currentLeverage) / (price * ctVal);
+                let qty = Math.floor(rawQty / lotSz) * lotSz;
+                if (qty < minSz) return null;
+                qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
                 leverageFixed = true;
-
                 break;
-
-            } else if (
-                levRes?.code === '59102'
-            ) {
-
-                if (
-                    currentLeverage > 50
-                ) {
-                    currentLeverage = 50;
-
-                } else if (
-                    currentLeverage > 30
-                ) {
-                    currentLeverage = 30;
-
-                } else if (
-                    currentLeverage > 20
-                ) {
-                    currentLeverage = 20;
-
-                } else if (
-                    currentLeverage > 10
-                ) {
-                    currentLeverage = 10;
-
-                } else {
-                    break;
-                }
-
+            } else if (levRes?.code === '59102') {
+                if (currentLeverage > 20) currentLeverage = 20;
+                else currentLeverage = 10;
             } else {
-
-                log(
-                    `❌ ${strInst}: Không set được leverage ${currentLeverage}x.`
-                );
-
-                return null;
+                break;
             }
         }
 
-        if (!leverageFixed) {
-            return null;
-        }
+        if (!leverageFixed) return null;
 
-        const tpStr =
-            tpPrice.toFixed(pPrec);
+        const tpStr = tpPrice.toFixed(pPrec);
+        const slStr = slPrice.toFixed(pPrec);
 
-        const slStr =
-            slPrice.toFixed(pPrec);
+        const orderResult = await okxApiRequest('/trade/order', 'POST', {
+            instId,
+            tdMode: 'cross',
+            side: side.toLowerCase(),
+            ordType: 'market',
+            sz: qtyStr,
+            posSide: side.toLowerCase() === 'buy' ? 'long' : 'short',
+            attachAlgoOrds: [
+                { "algoOrdType": "take_profit", "sz": qtyStr, "tpTriggerPx": tpStr, "tpOrdPx": "-1" },
+                { "algoOrdType": "stop_loss", "sz": qtyStr, "slTriggerPx": slStr, "slOrdPx": "-1" }
+            ]
+        });
 
-        const attachAlgoOrds = [
-
-            {
-                "algoOrdType":
-                    "take_profit",
-
-                "sz":
-                    qtyStr,
-
-                "tpTriggerPx":
-                    tpStr,
-
-                "tpOrdPx":
-                    "-1",
-
-                "tpTriggerPxType":
-                    "last"
-            },
-
-            {
-                "algoOrdType":
-                    "stop_loss",
-
-                "sz":
-                    qtyStr,
-
-                "slTriggerPx":
-                    slStr,
-
-                "slOrdPx":
-                    "-1",
-
-                "slTriggerPxType":
-                    "last"
-            }
-
-        ];
-
-        const sideLower =
-            String(side).toLowerCase();
-
-        /* ===== NET MODE ===== */
-
-        const orderResult =
-            await okxApiRequest(
-                '/trade/order',
-                'POST',
-                {
-                    instId:
-                        strInst,
-
-                    tdMode:
-                        'cross',
-
-                    side:
-                        sideLower,
-
-                    ordType:
-                        'market',
-
-                    sz:
-                        qtyStr,
-
-                    posSide:
-                        'net',
-
-                    attachAlgoOrds:
-                        attachAlgoOrds
-                }
-            );
-
-        if (
-            orderResult &&
-            orderResult.code === '0' &&
-            orderResult.data?.[0]?.ordId
-        ) {
-
-            const orderId =
-                orderResult
-                    .data[0]
-                    .ordId;
-
-            const quantity =
-                parseFloat(qtyStr);
-
-            const notional =
-                quantity *
-                price *
-                ctVal;
-
-            const margin =
-                notional /
-                currentLeverage;
-
-            log(
-                `✅ MỞ LỆNH THÀNH CÔNG ` +
-                `${strInst} ` +
-                `${sideLower.toUpperCase()} ` +
-                `${currentLeverage}x ` +
-                `| TP ${tpStr} ` +
-                `| SL ${slStr}`
-            );
+        if (orderResult && orderResult.code === '0') {
+            const orderId = orderResult.data[0].ordId;
+            const quantity = parseFloat(qtyStr);
+            const notional = quantity * price * ctVal;
+            const successLog = `✅ ĐÃ MỞ LỆNH ${side.toUpperCase()} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (~${notional.toFixed(2)} USDT)`;
+            log(successLog);
+            sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
 
             const orderInfo = {
-
-                id:
-                    orderId,
-
-                instId:
-                    strInst,
-
-                side:
-                    sideLower,
-
-                price,
-
-                quantity,
-
-                slPrice,
-
-                tpPrice,
-
-                margin,
-
-                status:
-                    'open',
-
-                ts:
-                    Date.now()
+                id: orderId, instId, side: side.toLowerCase(), price, quantity,
+                slPrice, tpPrice, capital: capitalPerTrade, leverage: currentLeverage,
+                timestamp: Date.now(), status: 'open'
             };
-
-            activeOrders[strInst] =
-                orderInfo;
-
+            activeOrders[instId] = orderInfo;
             return orderInfo;
         }
-
-        if (orderResult) {
-
-            const detail =
-                orderResult.data?.[0] || {};
-
-            log(
-                `❌ ${strInst}: ORDER FAILED ` +
-                `code=${orderResult.code} ` +
-                `sCode=${detail.sCode || ''} ` +
-                `msg=${detail.sMsg || orderResult.msg || ''}`
-            );
-
-        } else {
-
-            log(
-                `❌ ${strInst}: Không nhận được response từ OKX khi đặt lệnh.`
-            );
-        }
-
         return null;
-
     } catch (err) {
-
-        log(
-            `❌ ${instId}: Exception placeOrder - ${err.message}`
-        );
-
         return null;
     }
 }
 
-function sideUpper(s) {
-    return String(s).toUpperCase();
-}
-
-/* ================== CORE SCAN ================== */
+/* ================== CORE SCAN (QUÉT ĐỦ 120+ CẶP & CỐ ĐỊNH TOP 5) ================== */
 async function scanOnce() {
-
     if (isScanning) return;
-
     isScanning = true;
 
     try {
-
         initWebSocket();
 
         if (isTrading) {
-
-            const {
-                availBal
-            } = await getAccountBalance();
-
-            if (
-                availBal <
-                capitalPerTrade
-            ) {
-
-                log(
-                    `⚠️ Số dư khả dụng ` +
-                    `${availBal.toFixed(4)} USDT ` +
-                    `< ${capitalPerTrade} USDT.`
-                );
-
+            const { availBal } = await getAccountBalance();
+            if (availBal < capitalPerTrade) {
+                isScanning = false;
                 return;
             }
         }
 
-        const res =
-            await axios.get(
-                OKX_TICKERS
-            );
-
-        const j =
-            res.data;
-
-        if (!j?.data) return;
-
-        /*
-         * Lấy 120 SWAP USDT có thanh khoản cao nhất
-         * làm universe quét.
-         * Sau đó xếp hạng hoàn toàn theo Delta 1H.
-         */
-
-        const rawTickers =
-            j.data
-
-                .filter(t =>
-                    t.instId &&
-                    String(t.instId)
-                        .endsWith('-SWAP') &&
-                    String(t.instId)
-                        .includes('-USDT-')
-                )
-
-                .filter(t =>
-                    !EXCLUDE_PREFIXES.some(
-                        ex =>
-                            String(t.instId)
-                                .startsWith(ex)
-                    )
-                )
-
-                .map(t => {
-
-                    const last =
-                        parseFloat(
-                            t.last || 0
-                        );
-
-                    return {
-
-                        ...t,
-
-                        instId:
-                            String(t.instId),
-
-                        last,
-
-                        vol24h:
-                            Number(
-                                t.volCcy24h ||
-                                t.vol24h ||
-                                0
-                            )
-                    };
-                })
-
-                .filter(t =>
-                    t.last > 0
-                )
-
-                .sort(
-                    (a, b) =>
-                        b.vol24h -
-                        a.vol24h
-                )
-
-                .slice(0, 120);
-
-        const top120Tickers =
-            rawTickers;
-
-        if (
-            !top120Tickers.length
-        ) {
+        const res = await axios.get(OKX_TICKERS, { timeout: 6000 });
+        const j = res.data;
+        if (!j?.data) {
+            isScanning = false;
             return;
         }
 
-        /* ===== QUÉT 120 CẶP ===== */
+        // Lọc chuẩn xác toàn bộ các cặp đuôi -USDT-SWAP (hơn 120+ cặp)
+        const rawTickers = j.data
+            .filter(t => t.instId.endsWith('-USDT-SWAP') || (t.instId.endsWith('-SWAP') && t.instId.includes('USDT')))
+            .filter(t => !EXCLUDE_PREFIXES.some(ex => t.instId.startsWith(ex)))
+            .map(t => ({ instId: t.instId, last: parseFloat(t.last || 0), vol24h: parseFloat(t.vol24h || 0) }))
+            .filter(t => t.last > 0);
+
+        const totalPairs = rawTickers.length;
+        log(`🔍 Đang quét toàn bộ ${totalPairs} cặp giao dịch Futures...`);
 
         const atrPriceMap = {};
-
-        for (
-            let i = 0;
-            i < top120Tickers.length;
-            i += CONCURRENCY_LIMIT
-        ) {
-
-            const chunk =
-                top120Tickers.slice(
-                    i,
-                    i + CONCURRENCY_LIMIT
-                );
-
-            const rs =
-                await Promise.all(
-                    chunk.map(
-                        t =>
-                            fetchATR_Price1h(
-                                t.instId
-                            )
-                    )
-                );
-
-            rs.forEach(r => {
-
-                if (r?.instId) {
-
-                    atrPriceMap[
-                        r.instId
-                    ] = r;
-                }
-            });
-
-            log(
-                `🔎 Quét ` +
-                `${Math.min(
-                    i + chunk.length,
-                    top120Tickers.length
-                )}` +
-                `/${top120Tickers.length}`
-            );
-
-            /*
-             * 5 request / 250ms
-             * ≈ 20 request/giây,
-             * phù hợp tốc độ REST candles.
-             */
-
-            if (
-                i + CONCURRENCY_LIMIT <
-                top120Tickers.length
-            ) {
-                await sleep(250);
-            }
+        for (let i = 0; i < totalPairs; i += CONCURRENCY_LIMIT) {
+            const chunk = rawTickers.slice(i, i + CONCURRENCY_LIMIT);
+            const rs = await Promise.all(chunk.map(t => fetchATR_Price1h(t.instId)));
+            rs.forEach(r => { if (r?.instId) atrPriceMap[r.instId] = r; });
+            
+            const scannedCount = Math.min(i + CONCURRENCY_LIMIT, totalPairs);
+            log(`progress: ${scannedCount}/${totalPairs} cặp...`);
+            
+            if (i + CONCURRENCY_LIMIT < totalPairs) await sleep(20);
         }
 
-        /* ===== BUILD CANDIDATES THEO DELTA 1H ===== */
+        const allCandidates = [];
+        for (const t of rawTickers) {
+            const dataInfo = atrPriceMap[t.instId];
+            if (!dataInfo || !dataInfo.price1h || !dataInfo.atr) continue;
 
-        const candidates = [];
+            const last = t.last;
+            const { price1h, atr } = dataInfo;
+            const delta1h = ((last - price1h) / price1h) * 100;
+            const side = delta1h > 0 ? 'buy' : 'sell';
+            const { tp, sl } = calcTP_SL(last, atr, side === 'buy');
 
-        for (
-            const t of top120Tickers
-        ) {
-
-            const inst =
-                String(t.instId);
-
-            const last =
-                Number(t.last);
-
-            const dataInfo =
-                atrPriceMap[inst] || {};
-
-            const {
-                atr,
-                price1h
-            } = dataInfo;
-
-            if (
-                !last ||
-                !price1h ||
-                !atr
-            ) {
-                continue;
-            }
-
-            const delta =
-                (
-                    (last - price1h) /
-                    price1h
-                ) * 100;
-
-            const side =
-                delta > 0
-                    ? 'buy'
-                    : 'sell';
-
-            const {
-                tp,
-                sl
-            } =
-                calcTP_SL(
-                    last,
-                    atr,
-                    side === 'buy'
-                );
-
-            candidates.push({
-
-                instId:
-                    inst,
-
-                last,
-
-                price1h,
-
-                delta,
-
-                delta24h:
-                    t.open24h > 0
-                        ? (
-                            (last -
-                                Number(t.open24h)) /
-                            Number(t.open24h)
-                        ) * 100
-                        : 0,
-
-                atr,
-
-                tp,
-
-                sl,
-
-                side,
-
-                vol24h:
-                    Number(
-                        t.vol24h || 0
-                    )
-            });
+            allCandidates.push({ instId: t.instId, last, price1h, delta: delta1h, atr, tp, sl, side, vol24h: t.vol24h });
         }
 
-        const pumpCandidates =
-            candidates
+        const sortedByPump = [...allCandidates].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
+        const sortedByDump = [...allCandidates].filter(x => x.delta < 0).sort((a, b) => b.delta - a.delta);
 
-                .filter(
-                    x => x.delta > 0
-                )
-
-                .sort(
-                    (a, b) =>
-                        b.delta -
-                        a.delta
-                );
-
-        const dumpCandidates =
-            candidates
-
-                .filter(
-                    x => x.delta < 0
-                )
-
-                .sort(
-                    (a, b) =>
-                        a.delta -
-                        b.delta
-                );
-
-        /*
-         * =====================================================
-         * GIỮ CỐ ĐỊNH TOP 5 PUMP
-         * CHỈ THAY SLOT ĐÃ ĐÓNG
-         * =====================================================
-         */
-
-        if (
-            topPump.length === 0
-        ) {
-
-            topPump =
-                pumpCandidates
-                    .slice(0, TOP_N)
-                    .map(x => ({
-
-                        ...x,
-
-                        locked:
-                            true,
-
-                        closed:
-                            false,
-
-                        status:
-                            'open'
-                    }));
-
+        // CỐ ĐỊNH TOP 5: Giữ nguyên danh sách hiện tại, chỉ cập nhật số liệu mới hoặc điền thêm khi thiếu slot
+        if (!topPump || topPump.length === 0) {
+            topPump = sortedByPump.slice(0, TOP_N);
         } else {
-
-            for (
-                let i = 0;
-                i < topPump.length;
-                i++
-            ) {
-
-                const current =
-                    topPump[i];
-
-                const live =
-                    candidates.find(
-                        x =>
-                            x.instId ===
-                            current.instId
-                    );
-
-                /*
-                 * Coin còn vị thế:
-                 * chỉ cập nhật giá / delta,
-                 * KHÔNG thay coin.
-                 */
-
-                if (
-                    live &&
-                    !current.closed
-                ) {
-
-                    current.last =
-                        live.last;
-
-                    current.delta =
-                        live.delta;
-
-                    current.delta24h =
-                        live.delta24h;
-
-                    current.vol24h =
-                        live.vol24h;
-                }
-
-                /*
-                 * Coin đã đóng:
-                 * chỉ lúc này mới tìm coin mới.
-                 */
-
-                if (
-                    current.closed
-                ) {
-
-                    const replacement =
-                        pumpCandidates.find(
-                            x =>
-
-                                !topPump.some(
-                                    p =>
-                                        p.instId ===
-                                        x.instId
-                                ) &&
-
-                                !topDump.some(
-                                    p =>
-                                        p.instId ===
-                                        x.instId
-                                ) &&
-
-                                !activeOrders[
-                                    x.instId
-                                ]
-                        );
-
-                    if (
-                        replacement
-                    ) {
-
-                        topPump[i] = {
-
-                            ...replacement,
-
-                            locked:
-                                true,
-
-                            closed:
-                                false,
-
-                            status:
-                                'open'
-                        };
-
-                        log(
-                            `🔄 PUMP thay ` +
-                            `${current.instId} → ` +
-                            `${replacement.instId}`
-                        );
-                    }
+            topPump = topPump.map(existing => {
+                const updated = sortedByPump.find(x => x.instId === existing.instId);
+                return updated || existing;
+            });
+            if (topPump.length < TOP_N) {
+                for (const p of sortedByPump) {
+                    if (topPump.length >= TOP_N) break;
+                    if (!topPump.some(e => e.instId === p.instId)) topPump.push(p);
                 }
             }
         }
 
-        /*
-         * =====================================================
-         * GIỮ CỐ ĐỊNH TOP 5 DUMP
-         * CHỈ THAY SLOT ĐÃ ĐÓNG
-         * =====================================================
-         */
-
-        if (
-            topDump.length === 0
-        ) {
-
-            topDump =
-                dumpCandidates
-                    .slice(0, TOP_N)
-                    .map(x => ({
-
-                        ...x,
-
-                        locked:
-                            true,
-
-                        closed:
-                            false,
-
-                        status:
-                            'open'
-                    }));
-
+        if (!topDump || topDump.length === 0) {
+            topDump = sortedByDump.slice(0, TOP_N);
         } else {
-
-            for (
-                let i = 0;
-                i < topDump.length;
-                i++
-            ) {
-
-                const current =
-                    topDump[i];
-
-                const live =
-                    candidates.find(
-                        x =>
-                            x.instId ===
-                            current.instId
-                    );
-
-                /*
-                 * Coin còn vị thế:
-                 * chỉ cập nhật giá / delta,
-                 * KHÔNG thay coin.
-                 */
-
-                if (
-                    live &&
-                    !current.closed
-                ) {
-
-                    current.last =
-                        live.last;
-
-                    current.delta =
-                        live.delta;
-
-                    current.delta24h =
-                        live.delta24h;
-
-                    current.vol24h =
-                        live.vol24h;
-                }
-
-                /*
-                 * Coin đã đóng:
-                 * chỉ lúc này mới tìm coin mới.
-                 */
-
-                if (
-                    current.closed
-                ) {
-
-                    const replacement =
-                        dumpCandidates.find(
-                            x =>
-
-                                !topPump.some(
-                                    p =>
-                                        p.instId ===
-                                        x.instId
-                                ) &&
-
-                                !topDump.some(
-                                    p =>
-                                        p.instId ===
-                                        x.instId
-                                ) &&
-
-                                !activeOrders[
-                                    x.instId
-                                ]
-                        );
-
-                    if (
-                        replacement
-                    ) {
-
-                        topDump[i] = {
-
-                            ...replacement,
-
-                            locked:
-                                true,
-
-                            closed:
-                                false,
-
-                            status:
-                                'open'
-                        };
-
-                        log(
-                            `🔄 DUMP thay ` +
-                            `${current.instId} → ` +
-                            `${replacement.instId}`
-                        );
-                    }
+            topDump = topDump.map(existing => {
+                const updated = sortedByDump.find(x => x.instId === existing.instId);
+                return updated || existing;
+            });
+            if (topDump.length < TOP_N) {
+                for (const d of sortedByDump) {
+                    if (topDump.length >= TOP_N) break;
+                    if (!topDump.some(e => e.instId === d.instId)) topDump.push(d);
                 }
             }
         }
 
-        /*
-         * =====================================================
-         * WS CHỈ THEO DÕI 10 COIN ĐANG HIỂN THỊ
-         * =====================================================
-         */
-
-        subscribeWS([
-
-            ...topPump.map(
-                x => x.instId
-            ),
-
-            ...topDump.map(
-                x => x.instId
-            )
-
-        ]);
-
-        /*
-         * =====================================================
-         * VÀO LỆNH TRỰC TIẾP
-         * KHÔNG masterFlow
-         * KHÔNG trailing
-         * TỐI ĐA 10 VỊ THẾ
-         * =====================================================
-         */
+        subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
         if (isTrading) {
-
-            for (
-                const p of [
-                    ...topPump,
-                    ...topDump
-                ]
-            ) {
-
-                if (
-                    Object.keys(
-                        activeOrders
-                    ).length >= 10
-                ) {
-                    break;
-                }
-
-                if (
-                    !p ||
-                    p.closed ||
-                    activeOrders[
-                        p.instId
-                    ]
-                ) {
-                    continue;
-                }
-
-                /*
-                 * TP/SL được giữ nguyên theo
-                 * thời điểm coin được chọn.
-                 * Giá hiện tại chỉ dùng cho realtime display.
-                 */
-
-                await placeOrder(
-                    p.instId,
-                    p.side,
-                    p.last,
-                    p.sl,
-                    p.tp
-                );
+            const qualityCandidates = [...topPump, ...topDump].filter(c => !activeOrders[c.instId]);
+            for (const p of qualityCandidates) {
+                if (Object.keys(activeOrders).length >= 10) break;
+                const order = await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
+                if (order) activeOrders[p.instId] = order;
             }
         }
-
     } catch (err) {
-
-        log(
-            'Lỗi scan: ' +
-            err.message
-        );
-
+        log('Lỗi scan: ' + err.message);
     } finally {
-
         isScanning = false;
     }
 }
 
+/* ================== MONITOR ORDERS ================== */
 async function monitorOrders() {
-
     try {
+        const posRes = await okxApiRequest('/account/positions?instType=SWAP');
+        if (!posRes || posRes.code !== '0') return;
 
-        const posRes =
-            await okxApiRequest(
-                '/account/positions?instType=SWAP'
-            );
+        const positions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
+        const runningInstIds = positions.map(p => p.instId);
 
-        if (
-            !posRes ||
-            posRes.code !== '0'
-        ) {
-            return;
-        }
-
-        const positions =
-            (posRes.data || [])
-                .filter(
-                    p =>
-                        Math.abs(+p.pos) > 0
-                );
-
-        const runningInstIds =
-            positions.map(
-                p =>
-                    String(p.instId)
-            );
-
-        /*
-         * Đồng bộ các vị thế thật trên OKX
-         * vào activeOrders.
-         */
-
-        for (
-            const p of positions
-        ) {
-
-            const id =
-                String(p.instId);
-
-            if (
-                !activeOrders[id]
-            ) {
-
-                activeOrders[id] = {
-
-                    id:
-                        p.posId || '',
-
-                    instId:
-                        id,
-
-                    side:
-                        Number(p.pos) >= 0
-                            ? 'buy'
-                            : 'sell',
-
-                    price:
-                        Number(
-                            p.avgPx || 0
-                        ),
-
-                    quantity:
-                        Math.abs(
-                            Number(
-                                p.pos || 0
-                            )
-                        ),
-
-                    status:
-                        'open',
-
-                    ts:
-                        Date.now()
-                };
-            }
-        }
-
-        /*
-         * Nếu vị thế biến mất khỏi OKX
-         * → TP / SL / đóng thủ công
-         * → mở khóa slot Top 5.
-         */
-
-        for (
-            const id in activeOrders
-        ) {
-
-            if (
-                !runningInstIds.includes(id)
-            ) {
-
-                /*
-                 * Không xóa quá sớm ngay sau khi
-                 * vừa đặt lệnh và OKX chưa kịp
-                 * phản hồi position.
-                 */
-
-                if (
-                    activeOrders[id]?.ts &&
-                    Date.now() -
-                        activeOrders[id].ts <
-                        15000
-                ) {
-                    continue;
-                }
-
+        for (const id in activeOrders) {
+            if (!runningInstIds.includes(id)) {
+                log(`🔔 Vị thế ${id} đã chạm TP/SL hoặc đóng. Đã giải phóng khỏi Top để quét coin mới.`);
                 delete activeOrders[id];
-
-                const pump =
-                    topPump.find(
-                        x =>
-                            x.instId === id
-                    );
-
-                if (pump) {
-
-                    pump.closed =
-                        true;
-
-                    pump.status =
-                        'closed';
-                }
-
-                const dump =
-                    topDump.find(
-                        x =>
-                            x.instId === id
-                    );
-
-                if (dump) {
-
-                    dump.closed =
-                        true;
-
-                    dump.status =
-                        'closed';
-                }
-
-                log(
-                    `♻️ Vị thế ${id} đã đóng → ` +
-                    `slot Top 5 được phép thay coin ` +
-                    `ở vòng scan kế tiếp.`
-                );
+                topPump = topPump.filter(x => x.instId !== id);
+                topDump = topDump.filter(x => x.instId !== id);
             }
         }
-
-    } catch (e) {
-
-        log(
-            `❌ Lỗi đồng bộ positions: ` +
-            `${e.message}`
-        );
-    }
-}
-
-function setTradingState(state) {
-
-    isTrading =
-        Boolean(state);
-
-    log(
-        `Trạng thái Auto Trade: ` +
-        `${
-            isTrading
-                ? 'BẬT 🟢'
-                : 'TẮT 🔴'
-        }`
-    );
-
-    return isTrading;
-}
-
-function getTradingState() {
-    return isTrading;
-}
-
-async function runBotCycle() {
-
-    await monitorOrders();
-
-    await scanOnce();
+    } catch (e) {}
 }
 
 /* ================== EXPORTS ================== */
-module.exports = {
+function setTradingState(state) {
+    isTrading = Boolean(state);
+    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢' : 'TẮT 🔴'}`);
+    return isTrading;
+}
 
-    runBotCycle,
+function getTradingState() { return isTrading; }
 
-    setTradingState,
-
-    getTradingState,
-
-    get activeOrders() {
-        return activeOrders;
-    },
-
-    get tradeHistory() {
-        return tradeHistory;
-    },
-
-    get topPump() {
-        return topPump;
-    },
-
-    get topDump() {
-        return topDump;
+function setTradingConfig(config) {
+    if (config) {
+        if (config.capital !== undefined) capitalPerTrade = parseFloat(config.capital) || 10;
+        if (config.leverage !== undefined) defaultLeverage = parseInt(config.leverage) || 20;
+        log(`⚙️ Cấu hình mới -> Vốn: ${capitalPerTrade} USDT | Lev: ${defaultLeverage}x`);
     }
+}
+
+async function runBotCycle() {
+    await monitorOrders();
+    await scanOnce();
+}
+
+module.exports = {
+    runBotCycle,
+    setTradingState,
+    getTradingState,
+    setTradingConfig,
+    get activeOrders() { return activeOrders; },
+    get tradeHistory() { return tradeHistory; },
+    get topPump() { return topPump; },
+    get topDump() { return topDump; }
 };
