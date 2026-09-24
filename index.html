@@ -546,14 +546,29 @@ async function scanOnce(){
       topDump = data.topDump || [];
       activeOrders = data.activeOrders || {};
       
-      // Xây dựng lại bảng positions từ topPump và topDump nhận từ server
-      [...topPump, ...topDump].forEach(inst => {
-        if (!positions[inst]) {
-          positions[inst] = { inst, base: inst.split('-USDT')[0], last: 0, delta: 0, status: 'open', hasOrder: activeOrders[inst] ? true : false };
-        } else {
-          positions[inst].hasOrder = activeOrders[inst] ? true : false;
+      // Xây dựng lại bảng positions từ topPump và topDump nhận từ server (Đã xử lý an toàn chống lỗi split)
+[...topPump, ...topDump].forEach(item => {
+    // Lấy chuỗi instId an toàn dù server trả về kiểu string hay object
+    const inst = typeof item === 'string' ? item : (item?.instId || '');
+    if (!inst) return;
+
+    if (!positions[inst]) {
+        positions[inst] = { 
+            inst, 
+            base: String(inst).split('-')[0], 
+            last: typeof item === 'object' ? (item.last || 0) : 0, 
+            delta: typeof item === 'object' ? (item.delta || 0) : 0, 
+            status: 'open', 
+            hasOrder: activeOrders[inst] ? true : false 
+        };
+    } else {
+        positions[inst].hasOrder = activeOrders[inst] ? true : false;
+        if (typeof item === 'object') {
+            if (item.last) positions[inst].last = item.last;
+            if (item.delta !== undefined) positions[inst].delta = item.delta;
         }
-      });
+    }
+});
 
       status.textContent = `✅ Đồng bộ thành công: ${new Date().toLocaleTimeString()}`;
       document.getElementById('symbolsCount').innerText = `Số cặp: ${Object.keys(positions).length}`;
