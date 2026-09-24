@@ -1,5 +1,5 @@
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - TỐC ĐỘ CAO & REALTIME
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - CỐ ĐỊNH TOP 5 & REALTIME
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -19,11 +19,11 @@ const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
 let isTrading = false;
 let isScanning = false;
-const CONCURRENCY_LIMIT = 10; // Tăng tốc độ đồng thời quét lên 10 để chạy cực nhanh
+const CONCURRENCY_LIMIT = 10;
 const TOP_N = 5;
 
-let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
-let defaultLeverage = 20;  // Đòn bẩy mặc định
+let capitalPerTrade = 10;
+let defaultLeverage = 20;
 
 let ws = null;
 let wsSubscribed = new Set();
@@ -32,8 +32,9 @@ let isWsReconnecting = false;
 let activeOrders = {};
 let tradeHistory = [];
 let atrCache = {};
-const ATR_CACHE_TTL = 5 * 60 * 1000;
+const ATR_CACHE_TTL = 10 * 60 * 1000;
 
+// Biến lưu trữ Top 5 cố định
 let topPump = [];
 let topDump = [];
 
@@ -95,7 +96,7 @@ function initWebSocket() {
     ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
 
     ws.on('open', () => {
-        log("✅ WebSocket Connected (Real-time Tickers)");
+        log("✅ WebSocket Connected");
         isWsReconnecting = false;
         if (wsSubscribed.size > 0) {
             const list = Array.from(wsSubscribed);
@@ -115,17 +116,22 @@ function initWebSocket() {
                 const last = Number(d.last);
                 if (!isFinite(last)) continue;
 
-                // Cập nhật liên tục trực tiếp vào topPump để giao diện web nhảy số realtime
+                // Cập nhật trực tiếp giá và delta1h theo thời gian thực cho Top Pump
                 const pump = topPump.find(x => x.instId === inst);
                 if (pump) {
                     pump.last = last;
-                    if (pump.price1h) pump.delta = ((last - pump.price1h) / pump.price1h) * 100;
+                    if (pump.price1h) {
+                        pump.delta = ((last - pump.price1h) / pump.price1h) * 100;
+                    }
                 }
 
+                // Cập nhật trực tiếp giá và delta1h theo thời gian thực cho Top Dump
                 const dump = topDump.find(x => x.instId === inst);
                 if (dump) {
                     dump.last = last;
-                    if (dump.price1h) dump.delta = ((last - dump.price1h) / pump.price1h) * 100; // Sửa lỗi tham chiếu
+                    if (dump.price1h) {
+                        dump.delta = ((last - dump.price1h) / dump.price1h) * 100;
+                    }
                 }
 
                 if (activeOrders[inst]) {
@@ -135,9 +141,7 @@ function initWebSocket() {
         } catch (err) {}
     });
 
-    ws.on('close', () => {
-        autoReconnectWS();
-    });
+    ws.on('close', () => { autoReconnectWS(); });
 }
 
 function autoReconnectWS() {
@@ -287,7 +291,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
     }
 }
 
-/* ================== CORE SCAN (TỐC ĐỘ CAO 120 CẶP) ================== */
+/* ================== CORE SCAN (QUÉT NHANH & CỐ ĐỊNH TOP 5) ================== */
 async function scanOnce() {
     if (isScanning) return;
     isScanning = true;
@@ -328,7 +332,6 @@ async function scanOnce() {
             const scannedCount = Math.min(i + CONCURRENCY_LIMIT, totalPairs);
             log(`progress: ${scannedCount}/${totalPairs} cặp...`);
             
-            // Giảm sleep xuống 50ms để chạy cực nhanh như bản gốc
             if (i + CONCURRENCY_LIMIT < totalPairs) await sleep(50);
         }
 
@@ -349,24 +352,39 @@ async function scanOnce() {
         const sortedByPump = [...allCandidates].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
         const sortedByDump = [...allCandidates].filter(x => x.delta < 0).sort((a, b) => b.delta - a.delta);
 
-        // Cơ chế giữ cố định Top 5 cho các coin đang chạy lệnh, chỉ cập nhật coin mới khi trống chỗ để tránh nhảy lung tung
-        let keptPump = topPump.filter(p => activeOrders[p.instId] || p.status === 'open');
-        let keptDump = topDump.filter(d => activeOrders[d.instId] || d.status === 'open');
-
-        for (const p of sortedByPump) {
-            if (keptPump.length >= TOP_N) break;
-            if (!keptPump.some(e => e.instId === p.instId)) keptPump.push(p);
+        // LOGIC CỐ ĐỊNH TOP 5: Nếu đã có danh sách topPump / topDump, GIỮ NGUYÊN danh sách đó. 
+        // Chỉ điền mới / thay thế vị trí nếu danh sách đang trống hoặc chưa đủ 5 coin.
+        if (!topPump || topPump.length === 0) {
+            topPump = sortedByPump.slice(0, TOP_N);
+        } else {
+            // Cập nhật lại giá trị mới nhất cho các phần tử đang cố định trong topPump từ dữ liệu quét
+            topPump = topPump.map(existing => {
+                const updated = sortedByPump.find(x => x.instId === existing.instId);
+                return updated || existing;
+            });
+            // Nếu thiếu slot thì bù thêm
+            if (topPump.length < TOP_N) {
+                for (const p of sortedByPump) {
+                    if (topPump.length >= TOP_N) break;
+                    if (!topPump.some(e => e.instId === p.instId)) topPump.push(p);
+                }
+            }
         }
-        for (const d of sortedByDump) {
-            if (keptDump.length >= TOP_N) break;
-            if (!keptDump.some(e => e.instId === d.instId)) keptDump.push(d);
+
+        if (!topDump || topDump.length === 0) {
+            topDump = sortedByDump.slice(0, TOP_N);
+        } else {
+            topDump = topDump.map(existing => {
+                const updated = sortedByDump.find(x => x.instId === existing.instId);
+                return updated || existing;
+            });
+            if (topDump.length < TOP_N) {
+                for (const d of sortedByDump) {
+                    if (topDump.length >= TOP_N) break;
+                    if (!topDump.some(e => e.instId === d.instId)) topDump.push(d);
+                }
+            }
         }
-
-        topPump = keptPump.slice(0, TOP_N);
-        if (topPump.length === 0) topPump = sortedByPump.slice(0, TOP_N);
-
-        topDump = keptDump.slice(0, TOP_N);
-        if (topDump.length === 0) topDump = sortedByDump.slice(0, TOP_N);
 
         subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
@@ -396,9 +414,9 @@ async function monitorOrders() {
 
         for (const id in activeOrders) {
             if (!runningInstIds.includes(id)) {
-                log(`🔔 Vị thế ${id} đã chạm TP/SL hoặc đóng. Đã giải phóng vị thế khỏi Top.`);
+                log(`🔔 Vị thế ${id} đã chạm TP/SL hoặc đóng. Đã giải phóng khỏi Top để quét coin mới.`);
                 delete activeOrders[id];
-                // Xóa khỏi danh sách giữ cố định để quét lại coin hot mới
+                // Khi coin hit TP/SL xong thì xóa khỏi danh sách cố định để nhường chỗ cho vòng quét tiếp theo nạp coin mới vào
                 topPump = topPump.filter(x => x.instId !== id);
                 topDump = topDump.filter(x => x.instId !== id);
             }
