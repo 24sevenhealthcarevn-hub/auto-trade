@@ -1,5 +1,5 @@
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - BẢN GỐC CHUẨN XÁC
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -13,7 +13,7 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
-// Thông tin API OKX
+// Dán trực tiếp thông tin API OKX vào đây:
 const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
 const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
 const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
@@ -23,7 +23,7 @@ let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-// Cấu hình giao dịch
+// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
 let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
 let defaultLeverage = 20;  // Đòn bẩy mặc định
 
@@ -44,6 +44,7 @@ let topDump = [];
 const log = msg => {
     const formattedMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
     console.log(formattedMsg);
+    // Phát log tới server.js để gửi về giao diện Web nếu có callback
     if (global.broadcastLog && typeof global.broadcastLog === 'function') {
         global.broadcastLog(formattedMsg);
     }
@@ -76,6 +77,10 @@ async function okxPublic(endpoint) {
 }
 
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
+    const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+    const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+    const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+
     if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
         return null;
@@ -170,7 +175,9 @@ function initWebSocket() {
         autoReconnectWS();
     });
 
-    ws.on('error', (err) => {});
+    ws.on('error', (err) => {
+        // WS error
+    });
 }
 
 function autoReconnectWS() {
@@ -247,13 +254,16 @@ function calcTP_SL(last, atr, isLong) {
     return { tp, sl };
 }
 
-/* ================== ORDER EXECUTION ================== */
+/* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
         const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
         const instRes = await res.json();
         const info = instRes?.data?.[0];
-        if (!info) return null;
+        if (!info) {
+            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
+            return null;
+        }
 
         const ctVal = parseFloat(info.ctVal);
         const lotSz = parseFloat(info.lotSz);
@@ -278,7 +288,10 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
                 let rawQty = (capitalPerTrade * currentLeverage) / (price * ctVal);
                 let qty = Math.floor(rawQty / lotSz) * lotSz;
 
-                if (qty < minSz) return null;
+                if (qty < minSz) {
+                    log(`⚠️ ${instId}: Vốn ${capitalPerTrade} USDT không đủ để mở vị thế tối thiểu (${minSz} lot).`);
+                    return null;
+                }
 
                 qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
                 leverageFixed = true;
@@ -289,7 +302,10 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
                 else if (currentLeverage > 20) currentLeverage = 20;
                 else if (currentLeverage > 10) currentLeverage = 10;
                 else break;
+
+                log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x do giới hạn OKX`);
             } else {
+                log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
                 return null;
             }
         }
@@ -300,8 +316,18 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const slStr = slPrice.toFixed(pPrec);
 
         const attachAlgoOrds = [
-            { "algoOrdType": "take_profit", "sz": qtyStr, "tpTriggerPx": tpStr, "tpOrdPx": "-1" },
-            { "algoOrdType": "stop_loss", "sz": qtyStr, "slTriggerPx": slStr, "slOrdPx": "-1" }
+            {
+                "algoOrdType": "take_profit",
+                "sz": qtyStr,
+                "tpTriggerPx": tpStr,
+                "tpOrdPx": "-1"
+            },
+            {
+                "algoOrdType": "stop_loss",
+                "sz": qtyStr,
+                "slTriggerPx": slStr,
+                "slOrdPx": "-1"
+            }
         ];
 
         const sideLower = side.toLowerCase();
@@ -323,26 +349,43 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
             const notional = quantity * price * ctVal;
             const margin = notional / currentLeverage;
 
-            const successLog = `✅ ĐÃ MỞ LỆNH ${side.toUpperCase()} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
+            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
             log(successLog);
             sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
 
             const orderInfo = {
-                id: orderId, instId, side: sideLower, price, quantity,
-                slPrice, tpPrice, capital: capitalPerTrade, leverage: currentLeverage,
-                margin, notional, timestamp: Date.now(), status: 'open'
+                id: orderId,
+                instId,
+                side: sideLower,
+                price,
+                quantity,
+                slPrice,
+                tpPrice,
+                capital: capitalPerTrade,
+                leverage: currentLeverage,
+                margin,
+                notional,
+                timestamp: Date.now(),
+                status: 'open'
             };
 
             activeOrders[instId] = orderInfo;
             return orderInfo;
+        } else {
+            log(`❌ Lỗi đặt lệnh ${instId}: ${orderResult?.msg || 'Lỗi không xác định'}`);
+            return null;
         }
-        return null;
     } catch (err) {
+        log(`❌ Ngoại lệ khi đặt lệnh ${instId}: ${err.message}`);
         return null;
     }
 }
 
-/* ================== CORE SCAN (QUÉT 120 CẶP CÓ TIẾN TRÌNH) ================== */
+function sideUpper(s) {
+    return String(s).toUpperCase();
+}
+
+/* ================== CORE SCAN & MASTER FLOW ================== */
 async function scanOnce() {
     if (isScanning) return;
     isScanning = true;
@@ -355,82 +398,64 @@ async function scanOnce() {
             log(`💰 [OKX ACCOUNT] Số dư khả dụng: ${availBal.toFixed(2)} USDT | Tổng tài sản: ${eq.toFixed(2)} USDT`);
 
             if (availBal < capitalPerTrade) {
-                log(`⚠️ Số dư khả dụng không đủ. Tạm dừng mở vị thế mới!`);
-                isScanning = false;
+                log(`⚠️ Số dư khả dụng (${availBal.toFixed(2)} USDT) nhỏ hơn vốn cài đặt (${capitalPerTrade} USDT). Tạm dừng mở vị thế mới!`);
                 return;
             }
         }
 
         const res = await axios.get(OKX_TICKERS);
         const j = res.data;
-        if (!j?.data) {
-            isScanning = false;
-            return;
-        }
+        if (!j?.data) return;
 
         const rawTickers = j.data
             .filter(t => t.instId.endsWith('-SWAP') && t.instId.includes('USDT'))
             .filter(t => !EXCLUDE_PREFIXES.some(ex => t.instId.startsWith(ex)))
-            .map(t => ({
-                instId: t.instId,
-                last: parseFloat(t.last || 0)
-            }))
-            .filter(t => t.last > 0);
+            .map(t => {
+                const last = parseFloat(t.last || 0);
+                const open24h = parseFloat(t.open24h || t.sodUtc0 || last);
+                const delta24h = open24h > 0 ? ((last - open24h) / open24h) * 100 : 0;
+                return { ...t, last, delta24h };
+            });
 
-        const totalPairs = rawTickers.length;
-        log(`🔍 Bắt đầu quét dữ liệu ${totalPairs} cặp giao dịch trên sàn...`);
+        const top24hPump = [...rawTickers].sort((a, b) => b.delta24h - a.delta24h).slice(0, 60);
+        const top24hDump = [...rawTickers].sort((a, b) => a.delta24h - b.delta24h).slice(0, 60);
+        const top120Tickers = [...top24hPump, ...top24hDump];
 
         const atrPriceMap = {};
-        for (let i = 0; i < totalPairs; i += CONCURRENCY_LIMIT) {
-            const chunk = rawTickers.slice(i, i + CONCURRENCY_LIMIT);
+        for (let i = 0; i < top120Tickers.length; i += CONCURRENCY_LIMIT) {
+            const chunk = top120Tickers.slice(i, i + CONCURRENCY_LIMIT);
             const rs = await Promise.all(chunk.map(t => fetchATR_Price1h(t.instId)));
             rs.forEach(r => { if (r?.instId) atrPriceMap[r.instId] = r; });
-            
-            const scannedCount = Math.min(i + CONCURRENCY_LIMIT, totalPairs);
-            // Hiển thị tiến trình quét 5/120, 10/120... giống bản gốc
-            log(`progress: ${scannedCount}/${totalPairs} cặp...`);
-            
-            if (i + CONCURRENCY_LIMIT < totalPairs) await sleep(300);
+            if (i + CONCURRENCY_LIMIT < top120Tickers.length) await sleep(800);
         }
 
-        const allCandidates = [];
-        for (const t of rawTickers) {
-            const dataInfo = atrPriceMap[t.instId];
-            if (!dataInfo || !dataInfo.price1h || !dataInfo.atr) continue;
+        const candidates = [];
+        for (const t of top120Tickers) {
+            const inst = t.instId;
+            const last = Number(t.last);
+            const dataInfo = atrPriceMap[inst] || {};
+            const { atr, price1h } = dataInfo;
 
-            const last = t.last;
-            const { price1h, atr } = dataInfo;
-            const delta1h = ((last - price1h) / price1h) * 100;
-            const side = delta1h > 0 ? 'buy' : 'sell';
+            if (!last || !price1h || !atr) continue;
+
+            const delta = (last - price1h) / price1h * 100;
+            const side = delta > 0 ? 'buy' : 'sell';
             const { tp, sl } = calcTP_SL(last, atr, side === 'buy');
 
-            allCandidates.push({
-                instId: t.instId, last, price1h, delta: delta1h, atr, tp, sl, side
+            candidates.push({
+                instId: inst, last, price1h, delta, delta24h: t.delta24h,
+                atr, tp, sl, side
             });
         }
 
-        // Cập nhật topPump và topDump theo thời gian thực (đúng bản gốc)
-        const sortedByPump = [...allCandidates].filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
-        const sortedByDump = [...allCandidates].filter(x => x.delta < 0).sort((a, b) => b.delta - a.delta);
-
-        topPump = sortedByPump.slice(0, TOP_N);
-        topDump = sortedByDump.slice(0, TOP_N);
+        topPump = candidates.filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, TOP_N);
+        topDump = candidates.filter(x => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, TOP_N);
 
         subscribeWS([...topPump.map(x => x.instId), ...topDump.map(x => x.instId)]);
 
-        // Bước thực hiện đặt lệnh khi bật Auto Trade
         if (isTrading) {
-            const qualityCandidates = [...topPump, [...topDump].reverse()].flat()
-                .filter(c => !activeOrders[c.instId]);
-
-            for (const p of qualityCandidates) {
-                if (Object.keys(activeOrders).length >= 10) break;
-
-                const order = await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
-                if (order) {
-                    activeOrders[p.instId] = order;
-                }
-            }
+            const qualityCandidates = [...topPump, ...topDump].filter(c => !activeOrders[c.instId]);
+            await masterFlow(qualityCandidates);
         }
     } catch (err) {
         log('Lỗi scan: ' + err.message);
@@ -439,7 +464,38 @@ async function scanOnce() {
     }
 }
 
-/* ================== MONITOR ORDERS ================== */
+async function masterFlow(qualityCandidates) {
+    if (!isTrading) return;
+
+    try {
+        const posRes = await okxApiRequest('/account/positions?instType=SWAP');
+        if (!posRes || posRes.code !== '0') return;
+
+        const openPositions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
+        const openIds = new Set(openPositions.map(p => p.instId));
+
+        if (openIds.size >= 10) {
+            log('⚠️ Đã đạt giới hạn tối đa 10 vị thế song song.');
+            return;
+        }
+
+        const currentHour = new Date().getHours();
+        if (currentHour >= 22 || currentHour < 5) {
+            log(`💤 Khung giờ rủi ro rạng sáng (${currentHour}h). Dừng mở vị thế mới.`);
+            return;
+        }
+
+        for (const p of qualityCandidates) {
+            if (openIds.size >= 10) break;
+            if (openIds.has(p.instId)) continue;
+
+            await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
+        }
+    } catch (e) {
+        log('Lỗi masterFlow: ' + e.message);
+    }
+}
+
 async function monitorOrders() {
     try {
         const posRes = await okxApiRequest('/account/positions?instType=SWAP');
@@ -450,17 +506,19 @@ async function monitorOrders() {
 
         for (const id in activeOrders) {
             if (!runningInstIds.includes(id)) {
-                log(`🔔 Vị thế ${id} đã đóng (TP/SL). Giải phóng vị thế.`);
+                log(`🔔 Vị thế ${id} đã được đóng (dính TP/SL hoặc đóng tay).`);
                 delete activeOrders[id];
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        // Monitor error
+    }
 }
 
-/* ================== CONFIG & STATE EXPORTS ================== */
+/* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
 function setTradingState(state) {
     isTrading = Boolean(state);
-    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢' : 'TẮT 🔴'}`);
+    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢 (Đang chạy ngầm)' : 'TẮT 🔴'}`);
     return isTrading;
 }
 
@@ -468,24 +526,17 @@ function getTradingState() {
     return isTrading;
 }
 
-function setTradingConfig(config) {
-    if (config) {
-        if (config.capital !== undefined) capitalPerTrade = parseFloat(config.capital) || 10;
-        if (config.leverage !== undefined) defaultLeverage = parseInt(config.leverage) || 20;
-        log(`⚙️ Đã cập nhật cấu hình -> Vốn: ${capitalPerTrade} USDT | Đòn bẩy: ${defaultLeverage}x`);
-    }
-}
-
+/* ================== BOT CYCLE METHOD FOR SERVER.JS ================== */
 async function runBotCycle() {
     await monitorOrders();
     await scanOnce();
 }
 
+/* ================== EXPORTS ================== */
 module.exports = {
     runBotCycle,
     setTradingState,
     getTradingState,
-    setTradingConfig,
     get activeOrders() { return activeOrders; },
     get tradeHistory() { return tradeHistory; },
     get topPump() { return topPump; },
