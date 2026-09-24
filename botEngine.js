@@ -1,5 +1,5 @@
 /* ========================================================
-   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FIX LEVERAGE API
+   botEngine.js - CHẠY NỀN BACKEND (NODE.JS) - FULL FIX
    ======================================================== */
 const axios = require('axios');
 const crypto = require('crypto');
@@ -13,18 +13,25 @@ const OKX_TICKERS = 'https://www.okx.com/api/v5/market/tickers?instType=SWAP';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8799491154:AAFvQ1DnFK_UT8sNkEkw6Cizbg5SpAA7e9o';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '2002638809';
 
+// Dán trực tiếp thông tin API OKX vào đây:
+const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
+
 let isTrading = false;
 let isScanning = false;
 const CONCURRENCY_LIMIT = 5;
 const TOP_N = 5;
 
-let capitalPerTrade = 10; 
-let defaultLeverage = 20;  
+// Cấu hình giao dịch mặc định (Có thể tùy chỉnh hoặc lấy từ Request)
+let capitalPerTrade = 10; // Vốn mỗi lệnh (USDT)
+let defaultLeverage = 20;  // Đòn bẩy mặc định
 
 let ws = null;
 let wsSubscribed = new Set();
 let isWsReconnecting = false;
 
+// Trạng thái lưu trên RAM
 let activeOrders = {};
 let tradeHistory = [];
 let atrCache = {};
@@ -33,9 +40,11 @@ const ATR_CACHE_TTL = 5 * 60 * 1000;
 let topPump = [];
 let topDump = [];
 
+/* ================== UTILS & LOGGING ================== */
 const log = msg => {
     const formattedMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
     console.log(formattedMsg);
+    // Phát log tới server.js để gửi về giao diện Web nếu có callback
     if (global.broadcastLog && typeof global.broadcastLog === 'function') {
         global.broadcastLog(formattedMsg);
     }
@@ -47,10 +56,17 @@ async function sendTelegram(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     try {
-        await axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' });
-    } catch (e) {}
+        await axios.post(url, {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: message,
+            parse_mode: 'HTML'
+        });
+    } catch (e) {
+        // Bỏ qua lỗi gửi Telegram
+    }
 }
 
+/* ================== API CORE ================== */
 async function okxPublic(endpoint) {
     try {
         const res = await axios.get(OKX_API_BASE + endpoint);
@@ -60,11 +76,10 @@ async function okxPublic(endpoint) {
     }
 }
 
-// HÀM KÝ VÀ GỌI API CHUẨN XÁC VỚI OKX
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
-    const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
-    const secretKey = '8C07B300FE8DEA411762AB34C232AD6F';
-    const passphrase = 'Hongnguyen@1987';
+    const apiKey = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+    const secretKey = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
+    const passphrase = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
     if (!apiKey || !secretKey || !passphrase) {
         log("❌ Chưa cấu hình API Keys cho trading");
@@ -95,15 +110,22 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
         if (bodyStr) config.data = body;
 
         const res = await axios(config);
+        if (res.data && res.data.code !== "0") {
+            log(`⚠️ OKX API Error (${fullEndpoint}): Code ${res.data.code} - ${res.data.msg}`);
+        }
         return res.data;
     } catch (e) {
-        log(`❌ okxApiRequest Exception (${endpoint}): ${e.response ? JSON.stringify(e.response.data) : e.message}`);
+        log(`❌ okxApiRequest Exception: ${e.response ? JSON.stringify(e.response.data) : e.message}`);
         return null;
     }
 }
 
+/* ================== WEBSOCKET ================== */
 function initWebSocket() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
     ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
 
     ws.on('open', () => {
@@ -128,20 +150,43 @@ function initWebSocket() {
                 if (!isFinite(last)) continue;
 
                 const pump = topPump.find(x => x.instId === inst);
-                if (pump) { pump.last = last; if (pump.price1h) pump.delta = ((last - pump.price1h) / pump.price1h) * 100; }
+                if (pump) {
+                    pump.last = last;
+                    if (pump.price1h) pump.delta = ((last - pump.price1h) / pump.price1h) * 100;
+                }
 
                 const dump = topDump.find(x => x.instId === inst);
-                if (dump) { dump.last = last; if (dump.price1h) dump.delta = ((last - dump.price1h) / dump.price1h) * 100; }
+                if (dump) {
+                    dump.last = last;
+                    if (dump.price1h) dump.delta = ((last - dump.price1h) / dump.price1h) * 100;
+                }
 
-                if (activeOrders[inst]) activeOrders[inst].last = last;
+                if (activeOrders[inst]) {
+                    activeOrders[inst].last = last;
+                }
             }
-        } catch (err) {}
+        } catch (err) {
+            // Bỏ qua lỗi parse
+        }
     });
 
     ws.on('close', () => {
-        isWsReconnecting = true;
-        setTimeout(() => { isWsReconnecting = false; initWebSocket(); }, 3000);
+        log("⚠️ WebSocket Closed. Reconnecting in 3s...");
+        autoReconnectWS();
     });
+
+    ws.on('error', (err) => {
+        // WS error
+    });
+}
+
+function autoReconnectWS() {
+    if (isWsReconnecting) return;
+    isWsReconnecting = true;
+    setTimeout(() => {
+        isWsReconnecting = false;
+        initWebSocket();
+    }, 3000);
 }
 
 function subscribeWS(instIds) {
@@ -154,6 +199,7 @@ function subscribeWS(instIds) {
     }
 }
 
+/* ================== DATA FETCHING & ACCOUNT ================== */
 async function getAccountBalance() {
     try {
         const res = await okxApiRequest('/account/balance?ccy=USDT', 'GET');
@@ -162,7 +208,9 @@ async function getAccountBalance() {
             const eq = parseFloat(res.data[0].details[0].eq || 0);
             return { availBal, eq };
         }
-    } catch (err) {}
+    } catch (err) {
+        log(`❌ Lỗi kiểm tra số dư: ${err.message}`);
+    }
     return { availBal: 0, eq: 0 };
 }
 
@@ -174,9 +222,13 @@ async function fetchATR_Price1h(instId) {
 
         const resCandles = await axios.get(`${OKX_API_BASE}/market/history-candles?instId=${instId}&bar=1H&limit=30`);
         const j = resCandles.data;
+
         if (!Array.isArray(j.data) || j.data.length < 20) return null;
 
-        const candlesRaw = j.data.map(c => ({ high: +c[2], low: +c[3], close: +c[4], vol: +c[5] }));
+        const candlesRaw = j.data.map(c => ({
+            high: +c[2], low: +c[3], close: +c[4], vol: +c[5]
+        }));
+
         const price1h = candlesRaw[1].close;
         let trSum = 0;
         for (let i = 1; i <= 14; i++) {
@@ -186,7 +238,9 @@ async function fetchATR_Price1h(instId) {
             trSum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
         }
         const atr = trSum / 14;
-        const data = { instId, atr, price1h };
+        const volAvg1h = candlesRaw.slice(1, 11).reduce((sum, c) => sum + c.vol, 0) / 10;
+
+        const data = { instId, atr, price1h, volAvg1h };
         atrCache[instId] = { ts: now, data };
         return data;
     } catch (err) {
@@ -200,11 +254,16 @@ function calcTP_SL(last, atr, isLong) {
     return { tp, sl };
 }
 
+/* ================== ORDER EXECUTION (PLACE ORDER) ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
-        const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+        const res = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
+        const instRes = await res.json();
         const info = instRes?.data?.[0];
-        if (!info) return null;
+        if (!info) {
+            log(`❌ Không lấy được thông tin instrument cho ${instId}`);
+            return null;
+        }
 
         const ctVal = parseFloat(info.ctVal);
         const lotSz = parseFloat(info.lotSz);
@@ -219,7 +278,6 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         let leverageFixed = false;
 
         while (currentLeverage >= 10) {
-            // SỬ DỤNG HÀM OKX API REQUEST ĐỂ CÓ CHỮ KÝ HMAC HỢP LỆ CHO MỌI REQUEST TRADING
             const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
                 instId,
                 lever: currentLeverage.toString(),
@@ -230,17 +288,25 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
                 let rawQty = (capitalPerTrade * currentLeverage) / (price * ctVal);
                 let qty = Math.floor(rawQty / lotSz) * lotSz;
 
-                if (qty < minSz) return null;
+                if (qty < minSz) {
+                    log(`⚠️ ${instId}: Vốn ${capitalPerTrade} USDT không đủ để mở vị thế tối thiểu (${minSz} lot).`);
+                    return null;
+                }
 
                 qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
                 leverageFixed = true;
                 break;
             } else if (levRes?.code === '59102') {
-                if (currentLeverage > 20) currentLeverage = 20;
+                if (currentLeverage > 50) currentLeverage = 50;
+                else if (currentLeverage > 30) currentLeverage = 30;
+                else if (currentLeverage > 20) currentLeverage = 20;
                 else if (currentLeverage > 10) currentLeverage = 10;
                 else break;
+
+                log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x do giới hạn OKX`);
             } else {
-                break;
+                log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
+                return null;
             }
         }
 
@@ -250,8 +316,18 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const slStr = slPrice.toFixed(pPrec);
 
         const attachAlgoOrds = [
-            { "algoOrdType": "take_profit", "sz": qtyStr, "tpTriggerPx": tpStr, "tpOrdPx": "-1" },
-            { "algoOrdType": "stop_loss", "sz": qtyStr, "slTriggerPx": slStr, "slOrdPx": "-1" }
+            {
+                "algoOrdType": "take_profit",
+                "sz": qtyStr,
+                "tpTriggerPx": tpStr,
+                "tpOrdPx": "-1"
+            },
+            {
+                "algoOrdType": "stop_loss",
+                "sz": qtyStr,
+                "slTriggerPx": slStr,
+                "slOrdPx": "-1"
+            }
         ];
 
         const sideLower = side.toLowerCase();
@@ -269,27 +345,64 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
 
         if (orderResult && orderResult.code === '0') {
             const orderId = orderResult.data[0].ordId;
-            log(`✅ ĐÃ MỞ LỆNH THÀNH CÔNG ${side.toUpperCase()} ${qtyStr} Lot ${instId}`);
-            sendTelegram(`🚀 <b>ĐÃ MỞ LỆNH THÀNH CÔNG:</b> ${side.toUpperCase()} ${instId}`);
-            
-            activeOrders[instId] = { id: orderId, instId, side: sideLower, price, status: 'open' };
-            return true;
+            const quantity = parseFloat(qtyStr);
+            const notional = quantity * price * ctVal;
+            const margin = notional / currentLeverage;
+
+            const successLog = `✅ ĐÃ MỞ LỆNH ${sideUpper(side)} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (Vị thế ~${notional.toFixed(2)} USDT, Lev ${currentLeverage}x)`;
+            log(successLog);
+            sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
+
+            const orderInfo = {
+                id: orderId,
+                instId,
+                side: sideLower,
+                price,
+                quantity,
+                slPrice,
+                tpPrice,
+                capital: capitalPerTrade,
+                leverage: currentLeverage,
+                margin,
+                notional,
+                timestamp: Date.now(),
+                status: 'open'
+            };
+
+            activeOrders[instId] = orderInfo;
+            return orderInfo;
         } else {
             log(`❌ Lỗi đặt lệnh ${instId}: ${orderResult?.msg || 'Lỗi không xác định'}`);
             return null;
         }
     } catch (err) {
-        log(`❌ Lỗi ngoại lệ placeOrder ${instId}: ${err.message}`);
+        log(`❌ Ngoại lệ khi đặt lệnh ${instId}: ${err.message}`);
         return null;
     }
 }
 
+function sideUpper(s) {
+    return String(s).toUpperCase();
+}
+
+/* ================== CORE SCAN & MASTER FLOW ================== */
 async function scanOnce() {
     if (isScanning) return;
     isScanning = true;
 
     try {
         initWebSocket();
+
+        if (isTrading) {
+            const { availBal, eq } = await getAccountBalance();
+            log(`💰 [OKX ACCOUNT] Số dư khả dụng: ${availBal.toFixed(2)} USDT | Tổng tài sản: ${eq.toFixed(2)} USDT`);
+
+            if (availBal < capitalPerTrade) {
+                log(`⚠️ Số dư khả dụng (${availBal.toFixed(2)} USDT) nhỏ hơn vốn cài đặt (${capitalPerTrade} USDT). Tạm dừng mở vị thế mới!`);
+                return;
+            }
+        }
+
         const res = await axios.get(OKX_TICKERS);
         const j = res.data;
         if (!j?.data) return;
@@ -304,31 +417,35 @@ async function scanOnce() {
                 return { ...t, last, delta24h };
             });
 
-        const top24hPump = [...rawTickers].sort((a, b) => b.delta24h - a.delta24h).slice(0, 40);
-        const top24hDump = [...rawTickers].sort((a, b) => a.delta24h - b.delta24h).slice(0, 40);
-        const topTickers = [...top24hPump, ...top24hDump];
+        const top24hPump = [...rawTickers].sort((a, b) => b.delta24h - a.delta24h).slice(0, 60);
+        const top24hDump = [...rawTickers].sort((a, b) => a.delta24h - b.delta24h).slice(0, 60);
+        const top120Tickers = [...top24hPump, ...top24hDump];
 
         const atrPriceMap = {};
-        for (let i = 0; i < topTickers.length; i += CONCURRENCY_LIMIT) {
-            const chunk = topTickers.slice(i, i + CONCURRENCY_LIMIT);
+        for (let i = 0; i < top120Tickers.length; i += CONCURRENCY_LIMIT) {
+            const chunk = top120Tickers.slice(i, i + CONCURRENCY_LIMIT);
             const rs = await Promise.all(chunk.map(t => fetchATR_Price1h(t.instId)));
             rs.forEach(r => { if (r?.instId) atrPriceMap[r.instId] = r; });
-            if (i + CONCURRENCY_LIMIT < topTickers.length) await sleep(500);
+            if (i + CONCURRENCY_LIMIT < top120Tickers.length) await sleep(800);
         }
 
         const candidates = [];
-        for (const t of topTickers) {
+        for (const t of top120Tickers) {
             const inst = t.instId;
             const last = Number(t.last);
             const dataInfo = atrPriceMap[inst] || {};
             const { atr, price1h } = dataInfo;
+
             if (!last || !price1h || !atr) continue;
 
             const delta = (last - price1h) / price1h * 100;
             const side = delta > 0 ? 'buy' : 'sell';
             const { tp, sl } = calcTP_SL(last, atr, side === 'buy');
 
-            candidates.push({ instId: inst, last, delta, atr, tp, sl, side });
+            candidates.push({
+                instId: inst, last, price1h, delta, delta24h: t.delta24h,
+                atr, tp, sl, side
+            });
         }
 
         topPump = candidates.filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, TOP_N);
@@ -338,14 +455,44 @@ async function scanOnce() {
 
         if (isTrading) {
             const qualityCandidates = [...topPump, ...topDump].filter(c => !activeOrders[c.instId]);
-            for (const p of qualityCandidates) {
-                await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
-            }
+            await masterFlow(qualityCandidates);
         }
     } catch (err) {
         log('Lỗi scan: ' + err.message);
     } finally {
         isScanning = false;
+    }
+}
+
+async function masterFlow(qualityCandidates) {
+    if (!isTrading) return;
+
+    try {
+        const posRes = await okxApiRequest('/account/positions?instType=SWAP');
+        if (!posRes || posRes.code !== '0') return;
+
+        const openPositions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
+        const openIds = new Set(openPositions.map(p => p.instId));
+
+        if (openIds.size >= 10) {
+            log('⚠️ Đã đạt giới hạn tối đa 10 vị thế song song.');
+            return;
+        }
+
+        const currentHour = new Date().getHours();
+        if (currentHour >= 22 || currentHour < 5) {
+            log(`💤 Khung giờ rủi ro rạng sáng (${currentHour}h). Dừng mở vị thế mới.`);
+            return;
+        }
+
+        for (const p of qualityCandidates) {
+            if (openIds.size >= 10) break;
+            if (openIds.has(p.instId)) continue;
+
+            await placeOrder(p.instId, p.side, p.last, p.sl, p.tp);
+        }
+    } catch (e) {
+        log('Lỗi masterFlow: ' + e.message);
     }
 }
 
@@ -359,16 +506,19 @@ async function monitorOrders() {
 
         for (const id in activeOrders) {
             if (!runningInstIds.includes(id)) {
-                log(`🔔 Vị thế ${id} đã đóng.`);
+                log(`🔔 Vị thế ${id} đã được đóng (dính TP/SL hoặc đóng tay).`);
                 delete activeOrders[id];
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        // Monitor error
+    }
 }
 
+/* ================== QUẢN LÝ TRẠNG THÁI RUN/STOP ================== */
 function setTradingState(state) {
     isTrading = Boolean(state);
-    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢' : 'TẮT 🔴'}`);
+    log(`Trạng thái Auto Trade: ${isTrading ? 'BẬT 🟢 (Đang chạy ngầm)' : 'TẮT 🔴'}`);
     return isTrading;
 }
 
@@ -376,17 +526,19 @@ function getTradingState() {
     return isTrading;
 }
 
+/* ================== BOT CYCLE METHOD FOR SERVER.JS ================== */
 async function runBotCycle() {
     await monitorOrders();
     await scanOnce();
 }
 
+/* ================== EXPORTS ================== */
 module.exports = {
     runBotCycle,
     setTradingState,
     getTradingState,
-    activeOrders,
-    tradeHistory,
-    topPump,  // <--- Bổ sung dòng này nếu thiếu
-    topDump   // <--- Bổ sung dòng này nếu thiếu
+    get activeOrders() { return activeOrders; },
+    get tradeHistory() { return tradeHistory; },
+    get topPump() { return topPump; },
+    get topDump() { return topDump; }
 };
