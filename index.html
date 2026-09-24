@@ -189,106 +189,208 @@ function calcTP_SL(last, atr, isPump){
 // Đồng bộ trạng thái từ Server Render (`botEngine.js`)
 async function scanOnce(){
   if(isScanning) return;
-  isScanning = true;
   
+  isScanning = true;
   const scanBtn = document.getElementById('scanNow');
-  if(scanBtn) scanBtn.disabled = true;
+  scanBtn.disabled = true;
+  scanBtn.textContent = '⏳ Đang đồng bộ Server...';
   
   const status = document.getElementById('status');
+  status.textContent = '⏳ Đang đồng bộ dữ liệu từ Server...';
 
   try {
     const res = await fetch('/api/bot/status');
     const data = await res.json();
     
-    if (data) {
-      let rawPump = data.topPump || data.pump || data.topGainers || data.gainers || [];
-      let rawDump = data.topDump || data.dump || data.topLosers || data.losers || [];
-      
-      topPump = Array.isArray(rawPump) ? rawPump.map(i => typeof i === 'string' ? i : (i?.instId || i?.symbol || '')).filter(Boolean) : [];
-      topDump = Array.isArray(rawDump) ? rawDump.map(i => typeof i === 'string' ? i : (i?.instId || i?.symbol || '')).filter(Boolean) : [];
-      
-      activeOrders = data.activeOrders || data.orders || {};
-      if (data.history) orderHistory = data.history;
+    if (data.ok || data.success) {
 
-      // Cập nhật trạng thái nút Auto Trade từ Server nếu có
-      if (typeof data.running === 'boolean') {
-        isTrading = data.running;
-        const toggleBtn = document.getElementById('toggleTrade');
-        if (toggleBtn) {
-          if (isTrading) {
-            toggleBtn.textContent = '🟢 Dừng Auto Trade';
-            toggleBtn.className = 'btn-stop';
-          } else {
-            toggleBtn.textContent = '🔴 Bắt đầu Auto Trade';
-            toggleBtn.className = 'btn-trade';
+      /*
+       * KHÔNG thay toàn bộ Top 5 mỗi lần scan.
+       * Chỉ khởi tạo danh sách khi chưa có dữ liệu.
+       * Sau đó giữ nguyên 5 Pump + 5 Dump.
+       */
+      if (!topPump.length && Array.isArray(data.topPump)) {
+        topPump = data.topPump.slice(0, 5);
+      }
+
+      if (!topDump.length && Array.isArray(data.topDump)) {
+        topDump = data.topDump.slice(0, 5);
+      }
+
+      activeOrders = data.activeOrders || {};
+
+      /*
+       * Đồng bộ giá + Delta 1H từ Server cho
+       * ĐÚNG các coin đang nằm trong Top 5.
+       * Không thay đổi vị trí / thứ tự / danh sách.
+       */
+      [...(data.topPump || []), ...(data.topDump || [])].forEach(item => {
+
+        const inst = typeof item === 'string'
+          ? item
+          : (item?.instId || '');
+
+        if (!inst) return;
+
+        const current =
+          [...topPump, ...topDump].find(
+            x => String(
+              typeof x === 'string'
+                ? x
+                : x?.instId
+            ) === inst
+          );
+
+        if (!current) return;
+
+        if (typeof current === 'object' && typeof item === 'object') {
+
+          if (item.last !== undefined) {
+            current.last = item.last;
+          }
+
+          if (item.delta !== undefined) {
+            current.delta = item.delta;
+          }
+
+          if (item.delta24h !== undefined) {
+            current.delta24h = item.delta24h;
+          }
+
+          if (item.vol24h !== undefined) {
+            current.vol24h = item.vol24h;
+          }
+
+          if (item.price1h !== undefined) {
+            current.price1h = item.price1h;
+          }
+
+          if (item.atr !== undefined) {
+            current.atr = item.atr;
+          }
+
+          if (item.tp !== undefined) {
+            current.tp = item.tp;
+          }
+
+          if (item.sl !== undefined) {
+            current.sl = item.sl;
+          }
+
+          if (item.status !== undefined) {
+            current.status = item.status;
+          }
+
+          if (item.closed !== undefined) {
+            current.closed = item.closed;
           }
         }
-      }
+      });
 
-      // Lấy Tickers cơ bản từ OKX Public API để bù đắp giá real-time
-      let tickerMap = {};
-      try {
-        const tickRes = await fetch(OKX_TICKERS);
-        const tickJson = await tickRes.json();
-        if(tickJson?.data) {
-          tickJson.data.forEach(t => { if(t?.instId) tickerMap[t.instId] = t; });
-        }
-      } catch(e) {}
+      /*
+       * Xây dựng lại bảng positions nhưng CHỈ từ
+       * Top 5 Pump + Top 5 Dump hiện tại.
+       */
+      [...topPump, ...topDump].forEach(item => {
 
-      const allItems = [...topPump, ...topDump];
+        const inst =
+          typeof item === 'string'
+            ? item
+            : (item?.instId || '');
 
-      for (const inst of allItems) {
-        if (!inst || typeof inst !== 'string') continue;
-        const isPump = topPump.includes(inst);
-        const tickInfo = tickerMap[inst] || {};
-        let lastPrice = Number(tickInfo.last || 0);
-        let vol24h = tickInfo.vol24h || tickInfo.volCcy24h || 0;
-
-        const atrData = await fetchATR_Price1h(inst);
-        const price1h = atrData.price1h || lastPrice;
-        const atr = atrData.atr || 0.0001;
-        let delta = price1h > 0 && lastPrice > 0 ? ((lastPrice - price1h) / price1h * 100) : 0;
-        const tpSl = calcTP_SL(lastPrice, atr, isPump);
+        if (!inst) return;
 
         if (!positions[inst]) {
-          positions[inst] = { 
-            inst, 
-            base: inst.split('-')[0], 
-            last: lastPrice, 
-            delta, 
-            tp: tpSl.tp,
-            sl: tpSl.sl,
-            vol24h: Number(vol24h),
-            price1h,
-            status: 'open', 
-            hasOrder: !!activeOrders[inst] 
-          };
-        } else {
-          positions[inst].hasOrder = !!activeOrders[inst];
-          positions[inst].last = lastPrice || positions[inst].last;
-          positions[inst].delta = delta;
-          positions[inst].tp = tpSl.tp;
-          positions[inst].sl = tpSl.sl;
-          positions[inst].vol24h = Number(vol24h) || positions[inst].vol24h;
-        }
-      }
 
-      if(status) status.textContent = `✅ Đã đồng bộ Server: ${new Date().toLocaleTimeString()}`;
-      const countEl = document.getElementById('symbolsCount');
-      if(countEl) countEl.innerText = `Số cặp: ${allItems.length}`;
-      
+          positions[inst] = {
+            inst,
+            base: String(inst).split('-')[0],
+            last:
+              typeof item === 'object'
+                ? (item.last || 0)
+                : 0,
+            delta:
+              typeof item === 'object'
+                ? (item.delta || 0)
+                : 0,
+            status: 'open',
+            hasOrder:
+              activeOrders[inst]
+                ? true
+                : false
+          };
+
+        } else {
+
+          positions[inst].hasOrder =
+            activeOrders[inst]
+              ? true
+              : false;
+
+          if (typeof item === 'object') {
+
+            if (item.last !== undefined) {
+              positions[inst].last =
+                item.last;
+            }
+
+            if (item.delta !== undefined) {
+              positions[inst].delta =
+                item.delta;
+            }
+
+            if (item.status !== undefined) {
+              positions[inst].status =
+                item.status;
+            }
+          }
+        }
+      });
+
+      status.textContent =
+        `✅ Đồng bộ thành công: ${
+          new Date().toLocaleTimeString()
+        }`;
+
+      /*
+       * Đây là số coin đang HIỂN THỊ:
+       * 5 Pump + 5 Dump = 10.
+       * Không phải số lượng coin đã scan.
+       */
+      document.getElementById('symbolsCount').innerText =
+        `Số cặp: ${
+          topPump.length + topDump.length
+        }`;
+
       renderAll();
       updateWSSubscriptions();
-      updateOrderStats();
+
+    } else {
+
+      throw new Error(
+        'Server trả về trạng thái lỗi'
+      );
     }
+
   } catch(err){
-    if(status) status.textContent = '❌ Mất kết nối Server Render';
+
+    status.textContent =
+      '❌ Lỗi đồng bộ Server';
+
+    log(
+      'Lỗi đồng bộ Server: ' +
+      err.message
+    );
+
   } finally {
+
     isScanning = false;
-    if(scanBtn) {
-      scanBtn.disabled = false;
-      scanBtn.textContent = '🔄 Đồng bộ ngay';
-    }
+
+    scanBtn.disabled = false;
+
+    scanBtn.textContent =
+      '🔄 Quét ngay';
+
     startCountdown();
   }
 }
