@@ -386,5 +386,7 @@ module.exports = {
     setTradingState,
     getTradingState,
     activeOrders,
-    tradeHistory
+    tradeHistory,
+    topPump,  // <--- Bổ sung dòng này nếu thiếu
+    topDump   // <--- Bổ sung dòng này nếu thiếu
 };
