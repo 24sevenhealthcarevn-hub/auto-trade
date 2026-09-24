@@ -526,6 +526,7 @@ if (typeof price1hCache === 'undefined') {
 }
 
 // *** ĐÃ CHUYỂN LOGIC QUÉT SANG ĐỒNG BỘ DỮ LIỆU TỪ SERVER RENDER ***
+// *** ĐÃ CHUYỂN LOGIC QUÉT SANG ĐỒNG BỘ DỮ LIỆU TỪ SERVER RENDER ***
 async function scanOnce(){
   if(isScanning) return;
   
@@ -550,14 +551,39 @@ async function scanOnce(){
       let rawDump = data.topDump || data.dump || data.topLosers || data.losers || data.data?.topDump || [];
       
       // Nếu server trả về mảng dưới dạng object hoặc string thuần túy
-      topPump = Array.isArray(rawPump) ? rawPump : [];
-      topDump = Array.isArray(rawDump) ? rawDump : [];
+      topPump = Array.isArray(rawPump)
+        ? rawPump
+            .map(item => typeof item === 'string'
+              ? item
+              : (item?.instId || item?.symbol || item?.coin || '')
+            )
+            .filter(Boolean)
+        : [];
+
+      topDump = Array.isArray(rawDump)
+        ? rawDump
+            .map(item => typeof item === 'string'
+              ? item
+              : (item?.instId || item?.symbol || item?.coin || '')
+            )
+            .filter(Boolean)
+        : [];
+
       activeOrders = data.activeOrders || data.orders || {};
       
       // Nếu server trả về mảng rỗng, thử lấy trực tiếp từ data nếu nó là mảng các cặp coin
       if(topPump.length === 0 && Array.isArray(data)) {
-        topPump = data.slice(0, 5);
-        topDump = data.slice(5, 10);
+        topPump = data.slice(0, 5).map(item =>
+          typeof item === 'string'
+            ? item
+            : (item?.instId || item?.symbol || item?.coin || '')
+        ).filter(Boolean);
+
+        topDump = data.slice(5, 10).map(item =>
+          typeof item === 'string'
+            ? item
+            : (item?.instId || item?.symbol || item?.coin || '')
+        ).filter(Boolean);
       }
 
       // 1. Lấy dữ liệu ticker chung của OKX để bổ sung giá và Vol24h dự phòng
@@ -565,30 +591,52 @@ async function scanOnce(){
       try {
         const tickRes = await fetch(OKX_TICKERS);
         const tickJson = await tickRes.json();
+
         if(tickJson?.data) {
           tickJson.data.forEach(t => {
-            tickerMap[t.instId] = t;
+            if(t?.instId) {
+              tickerMap[t.instId] = t;
+            }
           });
         }
       } catch(e) {}
 
       // 2. Xây dựng lại bảng positions và đồng thời tính ATR, TP/SL, Vol24h
       const allItems = [...topPump, ...topDump];
-      for (const item of allItems) {
-        const inst = typeof item === 'string' ? item : (item?.instId || item?.symbol || item?.coin || '');
-        if (!inst) continue;
 
-        const isPump = topPump.includes(item) || topPump.some(p => (typeof p === 'string' ? p : p.instId || p.symbol) === inst);
+      for (const item of allItems) {
+        const inst = typeof item === 'string'
+          ? item
+          : (item?.instId || item?.symbol || item?.coin || '');
+
+        if (!inst || typeof inst !== 'string') continue;
+
+        const isPump = topPump.includes(inst);
         const tickInfo = tickerMap[inst] || {};
         
         let lastPrice = 0;
+
         if (typeof item === 'object') {
-          lastPrice = Number(item.last || item.price || item.close || tickInfo.last || 0);
+          lastPrice = Number(
+            item.last ||
+            item.price ||
+            item.close ||
+            tickInfo.last ||
+            0
+          );
         } else {
           lastPrice = Number(tickInfo.last || 0);
         }
 
-        const vol24h = tickInfo.vol24h || tickInfo.volCcy24h || (typeof item === 'object' ? (item.vol24h || item.volume) : 0) || 0;
+        const vol24h =
+          tickInfo.vol24h ||
+          tickInfo.volCcy24h ||
+          (
+            typeof item === 'object'
+              ? (item.vol24h || item.volume)
+              : 0
+          ) ||
+          0;
 
         // Lấy ATR và giá 1h để tính TP/SL chuẩn xác
         const atrData = await fetchATR_Price1h(inst);
@@ -596,7 +644,11 @@ async function scanOnce(){
         const atr = atrData.atr || 0.0001;
         
         let delta = 0;
-        if (typeof item === 'object' && (item.delta !== undefined || item.change !== undefined)) {
+
+        if (
+          typeof item === 'object' &&
+          (item.delta !== undefined || item.change !== undefined)
+        ) {
           delta = Number(item.delta ?? item.change);
         } else if (price1h > 0 && lastPrice > 0) {
           delta = ((lastPrice - price1h) / price1h * 100);
@@ -605,25 +657,26 @@ async function scanOnce(){
         const tpSl = calcTP_SL(lastPrice, atr, isPump);
 
         if (!positions[inst]) {
-            positions[inst] = { 
-                inst, 
-                base: String(inst).split('-')[0], 
-                last: lastPrice, 
-                delta: delta, 
-                tp: tpSl.tp,
-                sl: tpSl.sl,
-                vol24h: Number(vol24h),
-                price1h: price1h,
-                status: 'open', 
-                hasOrder: activeOrders[inst] ? true : false 
-            };
+          positions[inst] = { 
+            inst, 
+            base: String(inst).split('-')[0], 
+            last: lastPrice, 
+            delta: delta, 
+            tp: tpSl.tp,
+            sl: tpSl.sl,
+            vol24h: Number(vol24h),
+            price1h: price1h,
+            status: 'open', 
+            hasOrder: activeOrders[inst] ? true : false 
+          };
         } else {
-            positions[inst].hasOrder = activeOrders[inst] ? true : false;
-            positions[inst].last = lastPrice || positions[inst].last;
-            positions[inst].delta = delta;
-            positions[inst].tp = tpSl.tp;
-            positions[inst].sl = tpSl.sl;
-            positions[inst].vol24h = Number(vol24h) || positions[inst].vol24h;
+          positions[inst].hasOrder = activeOrders[inst] ? true : false;
+          positions[inst].last = lastPrice || positions[inst].last;
+          positions[inst].delta = delta;
+          positions[inst].tp = tpSl.tp;
+          positions[inst].sl = tpSl.sl;
+          positions[inst].vol24h = Number(vol24h) || positions[inst].vol24h;
+          positions[inst].price1h = price1h || positions[inst].price1h;
         }
       }
 
@@ -632,12 +685,15 @@ async function scanOnce(){
       
       renderAll();
       updateWSSubscriptions();
+
     } else {
       throw new Error('Server trả về dữ liệu trống');
     }
+
   } catch(err){
     status.textContent = '❌ Lỗi đồng bộ Server';
     log('Lỗi đồng bộ Server: ' + err.message);
+
   } finally {
     isScanning = false;
     scanBtn.disabled = false;
@@ -752,27 +808,41 @@ function updateWSSubscriptions(){
   ensureWS();
   if(!ws || ws.readyState !== 1) return;
   
-  const desired = [...new Set([...topPump, ...topDump])];
+  const desired = [...new Set(
+    [...topPump, ...topDump]
+      .map(i =>
+        typeof i === 'string'
+          ? i
+          : (i?.instId || i?.symbol || i?.coin || '')
+      )
+      .filter(i => typeof i === 'string' && i.length > 0)
+  )];
+
   const add = desired.filter(i => !subscribedInsts.includes(i));
   const rem = subscribedInsts.filter(i => !desired.includes(i));
   
   if(rem.length > 0){
     ws.send(JSON.stringify({
       op: 'unsubscribe',
-      args: rem.map(i => ({channel: 'tickers', instId: i}))
+      args: rem.map(i => ({
+        channel: 'tickers',
+        instId: i
+      }))
     }));
   }
   
   if(add.length > 0){
     ws.send(JSON.stringify({
       op: 'subscribe',
-      args: add.map(i => ({channel: 'tickers', instId: i}))
+      args: add.map(i => ({
+        channel: 'tickers',
+        instId: i
+      }))
     }));
   }
   
   subscribedInsts = desired.slice();
 }
-
 async function handleHit(inst, wasPump, reason){
   if (false) {}
 }
