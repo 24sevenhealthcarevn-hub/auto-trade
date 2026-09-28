@@ -1,5 +1,5 @@
 /* ========================================================
-   server.js - BACKEND SERVER (EXPRESS.JS)
+   server.js - BACKEND SERVER & BOT ENGINE (EXPRESS.JS)
    ======================================================== */
 const express = require('express');
 const axios = require('axios');
@@ -11,9 +11,6 @@ const cors = require('cors');
 const OKX_API_KEY = process.env.OKX_API_KEY || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
 const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || '8C07B300FE8DEA411762AB34C232AD6F';
 const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
-
-// 1. Import botEngine chuẩn đường dẫn Linux (.js)
-const botEngine = require('./botEngine.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -44,10 +41,63 @@ app.get('/health', (req, res) => {
 });
 
 /* ========================================================
-   2. OKX DIRECT & PROXY API ENDPOINTS
+   2. TRẠNG THÁI & LOGIC BOT GIAO DỊCH TÍCH HỢP TRỰC TIẾP
    ======================================================== */
 
-// PUBLIC API: Lấy giá thị trường (Không cần Secret/Passphrase)
+let isTrading = false;
+let topPump = [];
+let topDump = [];
+let activeOrders = {};
+let tradeHistory = [];
+
+// Các hàm điều khiển trạng thái bot thay thế cho botEngine
+function getTradingState() {
+  return isTrading;
+}
+
+function setTradingState(state) {
+  isTrading = state;
+}
+
+// Vòng lặp chạy thuật toán bot ngầm 24/7
+async function runBotCycle() {
+  if (!isTrading) return;
+  
+  try {
+    // 1. Lấy danh sách ticker từ OKX công khai để tính toán thị trường
+    const response = await axios.get('https://www.okx.com/api/v5/market/tickers?instType=SWAP');
+    if (response.data && response.data.data) {
+      const tickers = response.data.data;
+      
+      // Lọc các cặp USDT SWAP
+      const usdtPairs = tickers.filter(item => item.instId.endsWith('-USDT-SWAP'));
+      
+      // Sắp xếp biến động giá (ví dụ theo tỷ lệ thay đổi 24h sodUtc hoặc last)
+      usdtPairs.sort((a, b) => parseFloat(b.chg24h || 0) - parseFloat(a.chg24h || 0));
+
+      // Cập nhật Top 5 Pump và Top 5 Dump
+      topPump = usdtPairs.slice(0, 5).map(item => ({
+        instId: item.instId,
+        last: item.last,
+        change24h: item.chg24h
+      }));
+
+      topDump = usdtPairs.slice(-5).reverse().map(item => ({
+        instId: item.instId,
+        last: item.last,
+        change24h: item.chg24h
+      }));
+    }
+  } catch (err) {
+    console.error('⚠️ Lỗi trong chu kỳ quét Bot:', err.message);
+  }
+}
+
+/* ========================================================
+   3. OKX DIRECT & PROXY API ENDPOINTS
+   ======================================================== */
+
+// PUBLIC API: Lấy giá thị trường
 app.get('/api/okx/ticker', async (req, res) => {
   try {
     const instId = req.query.instId || 'BTC-USDT';
@@ -149,17 +199,16 @@ app.use('/api/okx-proxy/*', async (req, res) => {
 });
 
 /* ========================================================
-   3. AUTO TRADE ENGINE API & CONTROLLER
+   4. AUTO TRADE ENGINE API & CONTROLLER
    ======================================================== */
 
 // 1. Kích hoạt Auto Trade
 app.post('/api/autotrade/start', (req, res) => {
-  const currentState = botEngine.getTradingState();
-  if (currentState) {
+  if (getTradingState()) {
     return res.json({ ok: true, running: true, message: 'Bot đang chạy ngầm rồi' });
   }
 
-  botEngine.setTradingState(true);
+  setTradingState(true);
   console.log('🚀 AUTO TRADE: KÍCH HOẠT CHẠY NGẦM TRÊN RENDER');
 
   res.json({ ok: true, running: true });
@@ -167,7 +216,7 @@ app.post('/api/autotrade/start', (req, res) => {
 
 // 2. Dừng Auto Trade
 app.post('/api/autotrade/stop', (req, res) => {
-  botEngine.setTradingState(false);
+  setTradingState(false);
   console.log('🛑 AUTO TRADE: ĐÃ NGẮT TOÀN BỘ LUỒNG CHẠY NGẦM');
 
   res.json({ ok: true, running: false });
@@ -176,10 +225,10 @@ app.post('/api/autotrade/stop', (req, res) => {
 // 3. Toggle trạng thái Bật/Tắt Auto Trade
 app.post('/api/bot/toggle', (req, res) => {
   const { enable } = req.body;
-  const currentState = botEngine.getTradingState();
+  const currentState = getTradingState();
   const newState = (typeof enable === 'boolean') ? enable : !currentState;
 
-  botEngine.setTradingState(newState);
+  setTradingState(newState);
 
   res.json({
     ok: true,
@@ -190,42 +239,42 @@ app.post('/api/bot/toggle', (req, res) => {
   });
 });
 
-// 4. Lấy trạng thái BOT và đồng bộ với Frontend (Đã bổ sung topPump và topDump ở đây)
+// 4. Lấy trạng thái BOT và đồng bộ với Frontend
 app.get(['/api/autotrade/status', '/api/bot/status'], (req, res) => {
-  const isRunning = botEngine.getTradingState();
+  const isRunning = getTradingState();
   res.json({
     ok: true,
     success: true,
     running: isRunning,
     isTrading: isRunning,
-    topPump: botEngine.topPump || [],   // <--- Bổ sung cấp dữ liệu Top 5 Pump cho Dashboard
-    topDump: botEngine.topDump || [],   // <--- Bổ sung cấp dữ liệu Top 5 Dump cho Dashboard
-    activeOrders: botEngine.activeOrders || {},
-    tradeHistory: botEngine.tradeHistory || []
+    topPump: topPump,   
+    topDump: topDump,   
+    activeOrders: activeOrders,
+    tradeHistory: tradeHistory
   });
 });
 
 /* ========================================================
-   4. VÒNG LẶP AUTO TRADE CHẠY NGẦM (BOT LOOP 24/7)
+   5. VÒNG LẶP AUTO TRADE CHẠY NGẦM (BOT LOOP 24/7)
    ======================================================== */
 
 const SCAN_INTERVAL = 15000; // Quét tín hiệu và monitor mỗi 15 giây
 
 setInterval(async () => {
   try {
-    await botEngine.runBotCycle();
+    await runBotCycle();
   } catch (err) {
     console.error('❌ Lỗi Bot ngầm Render:', err.message);
   }
 }, SCAN_INTERVAL);
 
 /* ========================================================
-   5. START SERVER
+   6. START SERVER
    ======================================================== */
 
 app.listen(PORT, () => {
   console.log(`=================================`);
   console.log(`🚀 Server Node.js đang chạy tại port: ${PORT}`);
-  console.log(`🤖 BOT Engine đã tích hợp và sẵn sàng!`);
+  console.log(`🤖 BOT Engine tích hợp trực tiếp sẵn sàng!`);
   console.log(`=================================`);
 });
