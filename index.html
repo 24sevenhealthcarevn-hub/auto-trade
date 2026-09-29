@@ -909,7 +909,7 @@ async function handleHit(inst, wasPump, reason){
     updateWSSubscriptions();
     renderAll();
 
-    if (isTrading) {
+    if (false && isTrading) {
       const tradeSide = wasPump ? 'buy' : 'sell';
       placeOrder(replacementCandidate.inst, tradeSide, replacementCandidate.last, replacementCandidate.sl, replacementCandidate.tp)
         .then(order => {
