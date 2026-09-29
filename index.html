@@ -989,6 +989,7 @@ async function checkApiKeysValidity() {
 }
 
 async function toggleTrading() {
+  if (false) {
   const btn = document.getElementById('toggleTrade');
   if (!btn) return;
 
@@ -1036,7 +1037,8 @@ async function toggleTrading() {
     btn.disabled = false;
   }
 }
-
+}
+  
 // Khởi động hệ thống
 document.getElementById('scanNow').addEventListener('click', scanOnce);
 document.getElementById('toggleTrade').addEventListener('click', toggleTrading);
