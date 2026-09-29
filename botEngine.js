@@ -216,9 +216,13 @@ function calcTP_SL(last, atr, isLong) {
 /* ================== ORDER EXECUTION ================== */
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
     try {
+        // 1. Lấy thông tin chi tiết về hợp đồng (lotSz, minSz, ctVal, v.v.) từ OKX
         const res = await axios.get(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`, { timeout: 4000 });
         const info = res.data?.data?.[0];
-        if (!info) return null;
+        if (!info) {
+            log(`❌ Lỗi đặt lệnh ${instId}: Không tìm thấy thông tin instrument từ sàn.`);
+            return null;
+        }
 
         const ctVal = parseFloat(info.ctVal);
         const lotSz = parseFloat(info.lotSz);
@@ -228,35 +232,54 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         const pPrec = tickSz.toString().includes('.') ? tickSz.toString().split('.')[1].length : 0;
         const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
-        let currentLeverage = defaultLeverage;
+        let currentLeverage = defaultLeverage; // Mặc định có thể là 50x hoặc cấu hình của bạn
         let qtyStr = "";
         let leverageFixed = false;
 
-        while (currentLeverage >= 10) {
+        // 2. Logic hạ đòn bẩy tự động từ cao xuống thấp (Hỗ trợ từ 50x, 20x, 10x...) để khớp với biên độ ký quỹ
+        const possibleLeverages = [defaultLeverage, 50, 30, 20, 10];
+        // Lọc bỏ trùng lặp và sắp xếp giảm dần
+        const uniqueLeverages = [...new Set(possibleLeverages)].sort((a, b) => b - a);
+
+        for (const lev of uniqueLeverages) {
+            if (lev < 1) continue;
+            currentLeverage = lev;
+
             const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
                 instId, lever: currentLeverage.toString(), mgnMode: 'cross'
             });
 
+            // Mã '0' là thành công, '32115' là đòn bẩy không đổi/đã được cài đặt trước đó
             if (levRes?.code === '0' || levRes?.code === '32115') {
                 let rawQty = (capitalPerTrade * currentLeverage) / (price * ctVal);
                 let qty = Math.floor(rawQty / lotSz) * lotSz;
-                if (qty < minSz) return null;
+                
+                if (qty < minSz) {
+                    log(`⚠️ Lỗi ${instId}: Khối lượng tính toán (${qty}) nhỏ hơn mức tối thiểu sàn cho phép (${minSz}) ở đòn bẩy ${currentLeverage}x.`);
+                    return null;
+                }
+
                 qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
                 leverageFixed = true;
                 break;
             } else if (levRes?.code === '59102') {
-                if (currentLeverage > 20) currentLeverage = 20;
-                else currentLeverage = 10;
+                // Mã lỗi từ chối đòn bẩy cao do tài khoản/rủi ro, thử hạ xuống mức thấp hơn trong vòng lặp tiếp theo
+                continue;
             } else {
-                break;
+                log(`⚠️ Cảnh báo set-leverage ${instId} ở ${currentLeverage}x thất bại, mã lỗi từ sàn: ${levRes?.code} - ${levRes?.msg || 'Unknown'}`);
+                // Vẫn tiếp tục thử các mức đòn bẩy thấp hơn
             }
         }
 
-        if (!leverageFixed) return null;
+        if (!leverageFixed) {
+            log(`❌ Không thể thiết lập đòn bẩy phù hợp cho cặp ${instId} với vốn ${capitalPerTrade} USDT.`);
+            return null;
+        }
 
         const tpStr = tpPrice.toFixed(pPrec);
         const slStr = slPrice.toFixed(pPrec);
 
+        // 3. Gửi yêu cầu đặt lệnh Market kèm Take Profit / Stop Loss
         const orderResult = await okxApiRequest('/trade/order', 'POST', {
             instId,
             tdMode: 'cross',
@@ -274,7 +297,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
             const orderId = orderResult.data[0].ordId;
             const quantity = parseFloat(qtyStr);
             const notional = quantity * price * ctVal;
-            const successLog = `✅ ĐÃ MỞ LỆNH ${side.toUpperCase()} ${qtyStr} Lot ${instId} | SL: ${slStr} | TP: ${tpStr} (~${notional.toFixed(2)} USDT)`;
+            const successLog = `✅ ĐÃ MỞ LỆNH ${side.toUpperCase()} ${qtyStr} Lot ${instId} (${currentLeverage}x) | SL: ${slStr} | TP: ${tpStr} (~${notional.toFixed(2)} USDT)`;
             log(successLog);
             sendTelegram(`🚀 <b>BOT AUTO TRADE:</b>\n${successLog}`);
 
@@ -285,9 +308,12 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
             };
             activeOrders[instId] = orderInfo;
             return orderInfo;
+        } else {
+            log(`❌ Sàn từ chối lệnh ${instId}: Mã lỗi [${orderResult?.code}] - ${orderResult?.msg || 'Không rõ nguyên nhân'}`);
+            return null;
         }
-        return null;
     } catch (err) {
+        log(`❌ Lỗi ngoại lệ trong placeOrder (${instId}): ${err.message}`);
         return null;
     }
 }
