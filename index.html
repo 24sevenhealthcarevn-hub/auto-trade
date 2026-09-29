@@ -247,6 +247,7 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
   if (false) {
 // *** HÀM TRADE ĐÃ ĐÍNH KÈM TP/SL LÊN OKX SERVER ***
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
+  if (false) {
   const capital = parseFloat(document.getElementById('capitalPerTrade').value);
   const leverage = parseInt(document.getElementById('leverage').value);
 
@@ -399,6 +400,7 @@ if (!info) return null;
     return null;
   }
 }
+  }
   }
 // *** HÀM CLOSE ORDER ĐÃ ĐƯỢC CẢI TIẾN ĐỂ XỬ LÝ TP/SL TỰ ĐỘNG CỦA SERVER ***
 async function closeOrder(instId, reason) {
