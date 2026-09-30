@@ -1,5 +1,5 @@
 {
-  "name": "okx-auto-trade",
+  "name": "auto-trade",
   "version": "1.0.0",
   "description": "OKX Trading Bot",
   "main": "server.js",
