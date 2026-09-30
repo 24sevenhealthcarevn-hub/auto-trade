@@ -734,16 +734,17 @@ tr.innerHTML = `
 }
 
 function ensureWS(){
-  // Nếu WS đang mở hoặc đang kết nối thì không tạo connection mới
   if(
     ws &&
-    (ws.readyState === WebSocket.OPEN ||
-     ws.readyState === WebSocket.CONNECTING)
+    (
+      ws.readyState === WebSocket.OPEN ||
+      ws.readyState === WebSocket.CONNECTING
+    )
   ){
     return;
   }
 
-  try {
+  try{
     if(ws){
       ws.onopen = null;
       ws.onmessage = null;
@@ -757,20 +758,17 @@ function ensureWS(){
         ws.close();
       }
     }
-  } catch(err) {}
+  }catch(err){}
 
   ws = null;
 
-  // =====================================================
-  // OKX PRODUCTION PUBLIC WEBSOCKET
-  // =====================================================
   const WS_URL = 'wss://ws.okx.com:8443/ws/v5/public';
 
   log(`🔌 Kết nối OKX WS: ${WS_URL}`);
 
-  try {
+  try{
     ws = new WebSocket(WS_URL);
-  } catch(err) {
+  }catch(err){
     log(`❌ Không tạo được WebSocket: ${err.message}`);
     return;
   }
@@ -780,42 +778,31 @@ function ensureWS(){
 
     log('✅ WS Connected');
 
-    // Subscribe Top 5 Pump / Dump hiện tại
     updateWSSubscriptions();
 
-    // OKX yêu cầu ping định kỳ để giữ connection
     clearInterval(pingIntervalId);
 
     pingIntervalId = setInterval(() => {
       if(ws && ws.readyState === WebSocket.OPEN){
-        try {
+        try{
           ws.send('ping');
-        } catch(err) {
-          log(`⚠️ WS ping lỗi: ${err.message}`);
-        }
+        }catch(err){}
       }
     }, 15000);
   };
 
   ws.onmessage = e => {
-
-    // OKX trả pong dạng text
     if(e.data === 'pong') return;
 
-    try {
+    try{
       const m = JSON.parse(e.data);
 
-      // Một số response có thể trả event pong
       if(m.event === 'pong') return;
 
-      // =================================================
-      // REALTIME TICKERS
-      // =================================================
       if(
         m.arg?.channel === 'tickers' &&
         Array.isArray(m.data)
       ){
-
         m.data.forEach(d => {
 
           const inst = d.instId;
@@ -827,10 +814,8 @@ function ensureWS(){
 
           if(!pos) return;
 
-          // Cập nhật giá realtime
           pos.last = last;
 
-          // Cập nhật Delta 1H realtime
           if(pos.price1h){
             pos.delta =
               ((pos.last - pos.price1h) / pos.price1h) * 100;
@@ -838,35 +823,24 @@ function ensureWS(){
 
           const isPump = topPump.includes(inst);
 
-          // =============================================
-          // CLIENT TP / SL
-          // =============================================
           if(pos.status === 'open'){
 
             let hit = null;
 
             if(isPump){
-
               if(pos.last >= pos.tp){
                 hit = 'TP';
-              }
-              else if(pos.last <= pos.sl){
+              }else if(pos.last <= pos.sl){
                 hit = 'SL';
               }
-
             }else{
-
               if(pos.last <= pos.tp){
                 hit = 'TP';
-              }
-              else if(pos.last >= pos.sl){
+              }else if(pos.last >= pos.sl){
                 hit = 'SL';
               }
             }
 
-            // =========================================
-            // HIT TP / SL
-            // =========================================
             if(hit){
 
               pos.status = hit;
@@ -886,32 +860,29 @@ function ensureWS(){
           }
         });
 
-        // Render realtime Top 5
         renderAll();
       }
 
-    } catch(err) {
-      // Không để message WS lỗi làm chết connection
+    }catch(err){
+      // Bỏ qua lỗi parse WebSocket
     }
   };
-}
+
   ws.onclose = () => {
 
     clearInterval(pingIntervalId);
 
     reconnectAttempts++;
 
-    const delay =
-      Math.min(
-        5000 + reconnectAttempts * 1000,
-        30000
-      );
+    const delay = Math.min(
+      5000 + reconnectAttempts * 1000,
+      30000
+    );
 
     log(
       `⚠️ WS Disconnected, reconnect in ${delay / 1000}s`
     );
 
-    // Chỉ reconnect nếu ws hiện tại chính là connection này
     const closedWs = ws;
 
     setTimeout(() => {
@@ -927,74 +898,6 @@ function ensureWS(){
 
   ws.onerror = () => {
     log('❌ WS Error — đang chờ reconnect...');
-  };
-}
-  
-  ws.onmessage = e => {
-    // FIXED 2: Bỏ qua phản hồi "pong" dạng chuỗi thô từ OKX
-    if (e.data === 'pong') return;
-
-    try {
-      const m = JSON.parse(e.data);
-      if(m.event === 'pong') return;
-      
-      if(m.arg?.channel === 'tickers' && Array.isArray(m.data)){
-        m.data.forEach(d => {
-          const inst = d.instId;
-          const last = Number(d.last);
-          const pos = positions[inst];
-          if(!pos) return;
-          
-          pos.last = last;
-          if(pos.price1h) {
-            pos.delta = (pos.last - pos.price1h) / pos.price1h * 100;
-          }
-          
-          const isPump = topPump.includes(inst);
-          
-          // *** LOGIC KIỂM TRA TP/SL CLIENT-SIDE (TRIGGER CHO HANDLEHIT) ***
-          if(pos.status === 'open'){
-            let hit = null;
-            
-            if(isPump){
-              if(pos.last >= pos.tp) hit = 'TP';
-              else if(pos.last <= pos.sl) hit = 'SL';
-            } else {
-              if(pos.last <= pos.tp) hit = 'TP';
-              else if(pos.last >= pos.sl) hit = 'SL';
-            }
-            
-            if(hit){
-              pos.status = hit;
-              pos.hitTime = Date.now();
-              log(`${pos.base} hit ${hit} (${isPump ? 'Pump' : 'Dump'}) @ ${fmt(pos.last)}`);
-
-              if (activeOrders[inst]) {
-                closeOrder(inst, hit); 
-              }
-              
-              handleHit(inst, isPump, hit);
-            }
-          }
-        });
-        renderAll();
-      }
-    } catch(err) {
-      // Bỏ qua lỗi parse
-    }
-  };
-  
-  ws.onclose = () => {
-    reconnectAttempts++;
-    const delay = Math.min(5000 + reconnectAttempts * 1000, 30000);
-    log(`⚠️ WS Disconnected, reconnect in ${delay/1000}s`);
-    clearInterval(pingIntervalId);
-    setTimeout(ensureWS, delay);
-  };
-  
-  ws.onerror = (err) => {
-    // FIXED 3: Bỏ .message để tránh hiện undefined trong Log
-    log('❌ WS Error');
   };
 }
 
