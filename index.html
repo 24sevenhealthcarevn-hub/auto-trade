@@ -190,23 +190,27 @@ async function safeFetch(url, options = {}){
 }
 
 // Hàm ký và gọi API OKX
-async function getSignature(timestamp, method, requestPath, body = '') {
+async function getSignature(timestamp, method, requestPath, body = '', secret = '') {
   const message = timestamp + method + requestPath + body;
+
   const cryptoKey = await window.crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(secretKey),
+    new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign']
   );
+
   const signature = await window.crypto.subtle.sign(
     'HMAC',
     cryptoKey,
     new TextEncoder().encode(message)
   );
-  return btoa(String.fromCharCode(...new Uint8Array(signature)));
-}
 
+  return btoa(
+    String.fromCharCode(...new Uint8Array(signature))
+  );
+}
 async function okxApiRequest(endpoint, method = 'GET', body = null) {
   // Gán trực tiếp chuỗi Key vào đây
   const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
@@ -221,7 +225,13 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
   const timestamp = new Date().toISOString();
   const requestPath = `/api/v5${endpoint}`;
   const bodyStr = body ? JSON.stringify(body) : '';
-  const signature = await getSignature(timestamp, method, requestPath, bodyStr);
+  const signature = await getSignature(
+  timestamp,
+  method,
+  requestPath,
+  bodyStr,
+  secretKey
+);
   
   const headers = {
     'OK-ACCESS-KEY': apiKey,
