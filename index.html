@@ -244,10 +244,8 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
   return await safeFetch(`${OKX_API_BASE}${endpoint}`, fetchOptions);
 }
 
-  if (false) {
 // *** HÀM TRADE ĐÃ ĐÍNH KÈM TP/SL LÊN OKX SERVER ***
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
-  if (false) {
   const capital = parseFloat(document.getElementById('capitalPerTrade').value);
   const leverage = parseInt(document.getElementById('leverage').value);
 
@@ -400,8 +398,7 @@ if (!info) return null;
     return null;
   }
 }
-  }
-  }
+
 // *** HÀM CLOSE ORDER ĐÃ ĐƯỢC CẢI TIẾN ĐỂ XỬ LÝ TP/SL TỰ ĐỘNG CỦA SERVER ***
 async function closeOrder(instId, reason) {
   if (!activeOrders[instId]) return;
@@ -656,7 +653,7 @@ async function scanOnce(){
     }
 
     // Auto trade: Đặt lệnh cho các position mới (Song song)
-    if (false && isTrading) {
+    if (isTrading) {
       const tradePromises = [];
 
       for (const inst of topPump) {
@@ -909,7 +906,7 @@ async function handleHit(inst, wasPump, reason){
     updateWSSubscriptions();
     renderAll();
 
-    if (false && isTrading) {
+    if (isTrading) {
       const tradeSide = wasPump ? 'buy' : 'sell';
       placeOrder(replacementCandidate.inst, tradeSide, replacementCandidate.last, replacementCandidate.sl, replacementCandidate.tp)
         .then(order => {
@@ -1038,7 +1035,7 @@ async function toggleTrading() {
     btn.disabled = false;
   }
 }
-  
+
 // Khởi động hệ thống
 document.getElementById('scanNow').addEventListener('click', scanOnce);
 document.getElementById('toggleTrade').addEventListener('click', toggleTrading);
