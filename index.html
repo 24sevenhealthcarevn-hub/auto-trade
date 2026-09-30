@@ -894,7 +894,7 @@ function ensureWS(){
       // Không để message WS lỗi làm chết connection
     }
   };
-
+}
   ws.onclose = () => {
 
     clearInterval(pingIntervalId);
