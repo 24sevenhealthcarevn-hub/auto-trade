@@ -734,32 +734,201 @@ tr.innerHTML = `
 }
 
 function ensureWS(){
-  if(ws && ws.readyState === WebSocket.OPEN) return;
-  
+  // Nếu WS đang mở hoặc đang kết nối thì không tạo connection mới
+  if(
+    ws &&
+    (ws.readyState === WebSocket.OPEN ||
+     ws.readyState === WebSocket.CONNECTING)
+  ){
+    return;
+  }
+
   try {
-    if(ws) {
-      ws.onclose = null;
+    if(ws){
+      ws.onopen = null;
+      ws.onmessage = null;
       ws.onerror = null;
-      ws.close();
-      ws = null;
+      ws.onclose = null;
+
+      if(
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING
+      ){
+        ws.close();
+      }
     }
   } catch(err) {}
-  
-  ws = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
-  
+
+  ws = null;
+
+  // =====================================================
+  // OKX PRODUCTION PUBLIC WEBSOCKET
+  // =====================================================
+  const WS_URL = 'wss://ws.okx.com:8443/ws/v5/public';
+
+  log(`🔌 Kết nối OKX WS: ${WS_URL}`);
+
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch(err) {
+    log(`❌ Không tạo được WebSocket: ${err.message}`);
+    return;
+  }
+
   ws.onopen = () => {
     reconnectAttempts = 0;
+
     log('✅ WS Connected');
+
+    // Subscribe Top 5 Pump / Dump hiện tại
     updateWSSubscriptions();
-    
+
+    // OKX yêu cầu ping định kỳ để giữ connection
     clearInterval(pingIntervalId);
+
     pingIntervalId = setInterval(() => {
-      if(ws && ws.readyState === 1) {
-        // FIXED 1: Gửi chuỗi "ping" thô chuẩn API OKX thay vì JSON
-        ws.send("ping");
+      if(ws && ws.readyState === WebSocket.OPEN){
+        try {
+          ws.send('ping');
+        } catch(err) {
+          log(`⚠️ WS ping lỗi: ${err.message}`);
+        }
       }
     }, 15000);
   };
+
+  ws.onmessage = e => {
+
+    // OKX trả pong dạng text
+    if(e.data === 'pong') return;
+
+    try {
+      const m = JSON.parse(e.data);
+
+      // Một số response có thể trả event pong
+      if(m.event === 'pong') return;
+
+      // =================================================
+      // REALTIME TICKERS
+      // =================================================
+      if(
+        m.arg?.channel === 'tickers' &&
+        Array.isArray(m.data)
+      ){
+
+        m.data.forEach(d => {
+
+          const inst = d.instId;
+          const last = Number(d.last);
+
+          if(!inst || !Number.isFinite(last)) return;
+
+          const pos = positions[inst];
+
+          if(!pos) return;
+
+          // Cập nhật giá realtime
+          pos.last = last;
+
+          // Cập nhật Delta 1H realtime
+          if(pos.price1h){
+            pos.delta =
+              ((pos.last - pos.price1h) / pos.price1h) * 100;
+          }
+
+          const isPump = topPump.includes(inst);
+
+          // =============================================
+          // CLIENT TP / SL
+          // =============================================
+          if(pos.status === 'open'){
+
+            let hit = null;
+
+            if(isPump){
+
+              if(pos.last >= pos.tp){
+                hit = 'TP';
+              }
+              else if(pos.last <= pos.sl){
+                hit = 'SL';
+              }
+
+            }else{
+
+              if(pos.last <= pos.tp){
+                hit = 'TP';
+              }
+              else if(pos.last >= pos.sl){
+                hit = 'SL';
+              }
+            }
+
+            // =========================================
+            // HIT TP / SL
+            // =========================================
+            if(hit){
+
+              pos.status = hit;
+              pos.hitTime = Date.now();
+
+              log(
+                `${pos.base} hit ${hit} ` +
+                `(${isPump ? 'Pump' : 'Dump'}) @ ${fmt(pos.last)}`
+              );
+
+              if(activeOrders[inst]){
+                closeOrder(inst, hit);
+              }
+
+              handleHit(inst, isPump, hit);
+            }
+          }
+        });
+
+        // Render realtime Top 5
+        renderAll();
+      }
+
+    } catch(err) {
+      // Không để message WS lỗi làm chết connection
+    }
+  };
+
+  ws.onclose = () => {
+
+    clearInterval(pingIntervalId);
+
+    reconnectAttempts++;
+
+    const delay =
+      Math.min(
+        5000 + reconnectAttempts * 1000,
+        30000
+      );
+
+    log(
+      `⚠️ WS Disconnected, reconnect in ${delay / 1000}s`
+    );
+
+    // Chỉ reconnect nếu ws hiện tại chính là connection này
+    const closedWs = ws;
+
+    setTimeout(() => {
+
+      if(ws !== closedWs){
+        return;
+      }
+
+      ensureWS();
+
+    }, delay);
+  };
+
+  ws.onerror = () => {
+    log('❌ WS Error — đang chờ reconnect...');
+  };
+}
   
   ws.onmessage = e => {
     // FIXED 2: Bỏ qua phản hồi "pong" dạng chuỗi thô từ OKX
