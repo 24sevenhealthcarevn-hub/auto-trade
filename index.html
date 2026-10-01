@@ -344,68 +344,68 @@ if (!info) return null;
     if (!leverageFixed) return null;
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
-    const attachAlgoOrds = [
-        {
-            "algoOrdType": "take_profit",
-            "sz": qtyStr,
-            "tpTriggerPx": tpPrice.toFixed(6), // Giá kích hoạt TP
-            "tpOrdPx": "-1" // Đóng bằng Market Order khi kích hoạt
-        },
-        {
-            "algoOrdType": "stop_loss",
-            "sz": qtyStr,
-            "slTriggerPx": slPrice.toFixed(6), // Giá kích hoạt SL
-            "slOrdPx": "-1" // Đóng bằng Market Order khi kích hoạt
-        }
-    ];
+const attachAlgoOrds = [
+  {
+    "algoOrdType": "take_profit",
+    "sz": qtyStr,
+    "tpTriggerPx": tpPrice.toFixed(6),
+    "tpOrdPx": "-1"
+  },
+  {
+    "algoOrdType": "stop_loss",
+    "sz": qtyStr,
+    "slTriggerPx": slPrice.toFixed(6),
+    "slOrdPx": "-1"
+  }
+];
 
-    // 4. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
-    const orderResult = await okxApiRequest('/trade/order', 'POST', {
-      instId,
-      tdMode: 'cross',             
-      side,
-      ordType: 'market',
-      sz: qtyStr,     
-      posSide: side === 'buy' ? 'long' : 'short',
-      attachAlgoOrds: attachAlgoOrds 
-    });
+// 4. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
+const orderResult = await okxApiRequest('/trade/order', 'POST', {
+  instId,
+  tdMode: 'cross',
+  side,
+  ordType: 'market',
+  sz: qtyStr,
+  posSide: side === 'buy' ? 'long' : 'short',
+  attachAlgoOrds: attachAlgoOrds
+});
 
-    if (orderResult && orderResult.code === '0') {
-      const orderId = orderResult.data[0].ordId;
-      const quantity = parseFloat(qtyStr);
-      const notional = quantity * price * ctVal;
-      const margin = notional / currentLeverage;
+if (orderResult && orderResult.code === '0') {
+  const orderId = orderResult.data[0].ordId;
+  const quantity = parseFloat(qtyStr);
+  const notional = quantity * price * ctVal;
+  const margin = notional / currentLeverage;
 
-      log(
-        `✅ Đã đặt lệnh ${side} ${qtyStr} ${instId} | ` +
-        `SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)} ` +
-        `(Vị thế ~${notional.toFixed(2)} USDT, ` +
-        `Ký quỹ ~${margin.toFixed(2)} USDT, Lev ${currentLeverage}x)`
-      );
-      
-      const orderInfo = {
-        id: orderId,
-        instId,
-        side,
-        price, 
-        quantity,
-        slPrice,
-        tpPrice,
-        capital,
-        leverage: currentLeverage,
-        margin,
-        notional,
-        timestamp: Date.now(),
-        status: 'open'
-      };
-      
-      activeOrders[instId] = orderInfo;
-      return orderInfo;
-    } else {
-      log(`❌ Lỗi đặt lệnh cho ${instId}: ${orderResult?.msg || 'Unknown error'}`);
-      return null;
-    }
-  } catch (err) {
+  log(
+    `✅ Đã đặt lệnh ${side} ${qtyStr} ${instId} | ` +
+    `SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)} ` +
+    `(Vị thế ~${notional.toFixed(2)} USDT, ` +
+    `Ký quỹ ~${margin.toFixed(2)} USDT, Lev ${currentLeverage}x)`
+  );
+
+  const orderInfo = {
+    id: orderId,
+    instId,
+    side,
+    price,
+    quantity,
+    slPrice,
+    tpPrice,
+    capital,
+    leverage: currentLeverage,
+    margin,
+    notional,
+    timestamp: Date.now(),
+    status: 'open'
+  };
+
+  activeOrders[instId] = orderInfo;
+  return orderInfo;
+} else {
+  log(`❌ Lỗi đặt lệnh cho ${instId}: ${orderResult?.msg || 'Unknown error'}`);
+  return null;
+}
+} catch (err) {
     log(`❌ Lỗi khi đặt lệnh ${instId}: ${err.message}`);
     return null;
   }
@@ -632,32 +632,80 @@ async function scanOnce(){
 
     lastCandidates = candidates;
 
-    // 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP
-for(const c of candidates){
+    /// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP 
+for(const c of candidates){ 
+ 
+  const existing = positions[c.inst]; 
+ 
+  // Tính toán TP động mới trước
+  let newTp = c.tp;
+  if(existing?.hasOrder){
+    if(existing?.side === 'sell'){
+      newTp = Math.min(existing.tp || c.tp, c.tp);
+    } else {
+      newTp = Math.max(existing.tp || c.tp, c.tp);
+    }
+  }
 
-  const existing = positions[c.inst];
+  // Gọi API amend TP trực tiếp trên OKX nếu có thay đổi tăng/giảm hợp lệ
+  if(existing?.hasOrder && activeOrders[c.inst]){
+    const currentTp = activeOrders[c.inst].tpPrice || existing.tp || c.tp;
+    if(newTp !== currentTp){
+      const algoId = activeOrders[c.inst].algoId || existing.algoId;
+      if(algoId){
+        try {
+          const amendRes = await okxApiRequest('/trade/amend-algo-order', 'POST', {
+            instId: c.inst,
+            algoId: algoId,
+            newTpTriggerPx: newTp.toFixed(6),
+            newTpOrdPx: '-1'
+          });
+          if(amendRes && amendRes.code === '0'){
+            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${newTp.toFixed(4)}`);
+          } else {
+            log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
+          }
+        } catch (err) {
+          log(`❌ [AMEND TP EXCEPTION] ${c.inst}: ${err.message}`);
+        }
+      }
+    }
+  }
 
-  positions[c.inst] = {
-    ...c,
+  positions[c.inst] = { 
+    ...c, 
+ 
+    // Giữ trạng thái cũ 
+    status: existing?.status || 'open', 
+ 
+    hitTime: existing?.hitTime || null, 
+ 
+    hasOrder: 
+      existing?.hasOrder || 
+      activeOrders[c.inst] !== undefined, 
+ 
+    // TP động: không cho TP tụt xuống 
+    tp: newTp,
 
-    // Giữ trạng thái cũ
-    status: existing?.status || 'open',
-
-    hitTime: existing?.hitTime || null,
-
-    hasOrder:
-      existing?.hasOrder ||
-      activeOrders[c.inst] !== undefined,
-
-    // TP động: không cho TP tụt xuống
-    tp: existing?.hasOrder
-      ? (
-          existing?.side === 'sell'
-            ? Math.min(existing.tp || c.tp, c.tp)
-            : Math.max(existing.tp || c.tp, c.tp)
-        )
-      : c.tp
-  };
+    algoId: existing?.algoId || activeOrders[c.inst]?.algoId
+  }; 
+ 
+  // Cập nhật TP đang lưu cho lệnh đang chạy
+  if(existing?.hasOrder && activeOrders[c.inst]){
+    if(existing.side === 'sell'){
+      activeOrders[c.inst].tpPrice =
+        Math.min(
+          activeOrders[c.inst].tpPrice || c.tp,
+          c.tp
+        );
+    }else{
+      activeOrders[c.inst].tpPrice =
+        Math.max(
+          activeOrders[c.inst].tpPrice || c.tp,
+          c.tp
+        );
+    }
+  }
 }
 
     // 6. XẾP HẠNG PUMP / DUMP
