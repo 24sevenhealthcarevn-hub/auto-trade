@@ -14,13 +14,12 @@ const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || 'Hongnguyen@1987';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// ... (các đoạn code phía dưới giữ nguyên, đổi các chữ expressApp thành app)
 
 app.use(cors());
 app.use(express.json());
 
 // Phục vụ tệp tĩnh và định tuyến trang chủ index.html
-app.use(expressApp.static(__dirname));
+app.use(express.static(__dirname));
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
@@ -110,7 +109,6 @@ app.get('/api/okx/ticker', async (req, res) => {
 // PROXY CHUNG DÀNH CHO FRONTEND GỌI MỌI API OKX (Hỗ trợ cả Private & Public)
 app.all('/api/okx-proxy/*', async (req, res) => {
   try {
-    // Loại bỏ '/api/okx-proxy' để lấy phần đường dẫn phía sau (VD: /account/set-leverage -> /v5/account/set-leverage)
     const targetPath = req.originalUrl.replace('/api/okx-proxy', '/api/v5');
     const method = req.method;
     const timestamp = new Date().toISOString();
