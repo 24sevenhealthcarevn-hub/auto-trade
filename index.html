@@ -269,20 +269,6 @@ if (!leverage || leverage < 1) {
   return null;
 }
 
-  // 1.5 BỔ SUNG: KIỂM TRA SỐ LƯỢNG VỊ THẾ THỰC TẾ TRÊN SÀN TRƯỚC KHI ĐẶT LỆNH
-  try {
-    const posCheckResult = await okxApiRequest('/account/positions', 'GET', null);
-    const openPositions = posCheckResult?.data?.filter(p => p.pos !== '0') || [];
-    
-    // Nếu tổng vị thế đang mở trên sàn đã đạt hoặc vượt quá 10, chặn không cho mở thêm
-    if (openPositions.length >= 10) {
-      log(`⚠️ Đã đạt giới hạn tối đa 10 vị thế trên sàn OKX. Bỏ qua lệnh mới cho ${instId}`);
-      return null;
-    }
-  } catch (err) {
-    log(`⚠️ Không thể kiểm tra số lượng vị thế hiện tại: ${err.message}`);
-  }
-  
 // Bổ sung giá trị API Key trực tiếp tại đây
 const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
 
@@ -810,6 +796,8 @@ async function scanOnce(){
 
     startCountdown();
   }
+
+}
 
 function renderAll(){
   renderTop('pumpTable', topPump);
