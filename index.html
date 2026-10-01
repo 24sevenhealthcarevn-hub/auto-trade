@@ -118,7 +118,8 @@ const CANDIDATE_LIMIT = 120;
 const ATR_BAR_LIMIT = 14;
 
 const CONCURRENCY_LIMIT = 5; 
-
+// Khai báo Cache toàn cục an toàn ngay đầu script
+var price1hCache = typeof price1hCache !== 'undefined' ? price1hCache : {};
 // Biến toàn cục
 let positions = {};
 let topPump = [];
