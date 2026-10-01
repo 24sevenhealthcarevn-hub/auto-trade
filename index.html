@@ -167,6 +167,7 @@ function log(msg){
   const el = document.getElementById('log'); 
   el.innerText = `${new Date().toLocaleTimeString()} — ${msg}\n` + el.innerText; 
 }
+
 function fmt(n){ 
   return n === null || isNaN(n) ? '-' : (Number(n) >= 1 ? Number(n).toFixed(4) : Number(n).toPrecision(4)); 
 }
@@ -190,7 +191,7 @@ async function safeFetch(url, options = {}){
 }
 
 // Hàm ký và gọi API OKX
-async function getSignature(timestamp, method, requestPath, body = '', secret = '') {
+  async function getSignature(timestamp, method, requestPath, body = '', secret = '') {
   const message = timestamp + method + requestPath + body;
 
   const cryptoKey = await window.crypto.subtle.importKey(
@@ -211,7 +212,8 @@ async function getSignature(timestamp, method, requestPath, body = '', secret = 
     String.fromCharCode(...new Uint8Array(signature))
   );
 }
-async function okxApiRequest(endpoint, method = 'GET', body = null) {
+
+  async function okxApiRequest(endpoint, method = 'GET', body = null) {
   // Gán trực tiếp chuỗi Key vào đây
   const apiKey = '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
   const secretKey = '8C07B300FE8DEA411762AB34C232AD6F';
@@ -231,7 +233,7 @@ async function okxApiRequest(endpoint, method = 'GET', body = null) {
   requestPath,
   bodyStr,
   secretKey
-);
+  );
   
   const headers = {
     'OK-ACCESS-KEY': apiKey,
@@ -630,20 +632,33 @@ async function scanOnce(){
 
     lastCandidates = candidates;
 
-    // 5. CẬP NHẬT POSITIONS
-    for(const c of candidates){
+    // 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP
+for(const c of candidates){
 
-      const existing = positions[c.inst];
+  const existing = positions[c.inst];
 
-      positions[c.inst] = {
-        ...c,
-        status: existing?.status || 'open',
-        hitTime: existing?.hitTime || null,
-        hasOrder:
-          existing?.hasOrder ||
-          activeOrders[c.inst] !== undefined
-      };
-    }
+  positions[c.inst] = {
+    ...c,
+
+    // Giữ trạng thái cũ
+    status: existing?.status || 'open',
+
+    hitTime: existing?.hitTime || null,
+
+    hasOrder:
+      existing?.hasOrder ||
+      activeOrders[c.inst] !== undefined,
+
+    // TP động: không cho TP tụt xuống
+    tp: existing?.hasOrder
+      ? (
+          existing?.side === 'sell'
+            ? Math.min(existing.tp || c.tp, c.tp)
+            : Math.max(existing.tp || c.tp, c.tp)
+        )
+      : c.tp
+  };
+}
 
     // 6. XẾP HẠNG PUMP / DUMP
     const pos = candidates
@@ -796,7 +811,6 @@ async function scanOnce(){
 
     startCountdown();
   }
-
 }
 
 function renderAll(){
@@ -1035,6 +1049,13 @@ async function handleHit(inst, wasPump, reason){
     }
   } catch(err) {}
   
+  // 1. Cập nhật trạng thái coin cũ thành closed trong positions
+  if(positions[inst]){
+    positions[inst].status = 'closed';
+    positions[inst].hitTime = Date.now();
+  }
+  
+  // 2. Loại bỏ khỏi top hiện tại và danh sách subscribe websocket cũ
   topPump = topPump.filter(i => i !== inst);
   topDump = topDump.filter(i => i !== inst);
   subscribedInsts = subscribedInsts.filter(i => i !== inst);
@@ -1070,7 +1091,7 @@ async function handleHit(inst, wasPump, reason){
     if(wasPump){
       topPump.push(replacementCandidate.inst);
     } else {
-      topDump.push(replacementCandidate.inst);
+    topDump.push(replacementCandidate.inst);
     }
     
     log(`Thay thế ${inst} bằng ${replacementCandidate.base} (${wasPump ? 'Pump' : 'Dump'})`);
@@ -1087,6 +1108,7 @@ async function handleHit(inst, wasPump, reason){
 
   } else {
     log(`Không tìm thấy replacement cho ${inst}`);
+    renderAll();
   }
 }
 
