@@ -294,54 +294,59 @@ try {
 const info = instRes?.data?.[0];
 if (!info) return null;
 
-    const ctVal = parseFloat(info.ctVal);
-    const lotSz = parseFloat(info.lotSz);
-    const minSz = parseFloat(info.minSz || lotSz);
-    const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
+const ctVal = parseFloat(info.ctVal);
+const lotSz = parseFloat(info.lotSz);
+const minSz = parseFloat(info.minSz || lotSz);
+const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
-    let currentLeverage = leverage;
-    let qtyStr = "";
-    let leverageFixed = false;
+let currentLeverage = leverage;
+let qtyStr = "";
+let leverageFixed = false;
 
-    while (currentLeverage >= 10) {
-        const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
-            instId,
-            lever: currentLeverage.toString(),
-            mgnMode: 'cross'
-        });
+// Các mốc đòn bẩy chuẩn phổ biến trên OKX (sắp xếp giảm dần)
+const standardLeverages = [75, 50, 30, 20, 10, 5];
 
-        if (levRes?.code === '0' || levRes?.code === '32115') {
+// Tạo hàng đợi đòn bẩy dựa trên mức người dùng nhập (không bị kẹt ở mốc cố định)
+let leverageQueue = standardLeverages.filter(l => l <= currentLeverage);
+if (!leverageQueue.includes(currentLeverage)) {
+    leverageQueue.unshift(currentLeverage);
+}
+leverageQueue.sort((a, b) => b - a);
 
-            let rawQty = (capital * currentLeverage) / (price * ctVal);
+for (let targetLev of leverageQueue) {
+    const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
+        instId,
+        lever: targetLev.toString(),
+        mgnMode: 'cross'
+    });
 
-            let qty = Math.floor(rawQty / lotSz) * lotSz;
+    if (levRes?.code === '0' || levRes?.code === '32115') {
+        currentLeverage = targetLev;
+        let rawQty = (capital * currentLeverage) / (price * ctVal);
+        let qty = Math.floor(rawQty / lotSz) * lotSz;
 
-            if (qty < minSz) {
-                log(`⚠️ ${instId}: Vốn ${capital} USDT không đủ để mở vị thế tối thiểu.`);
-                return null;
-            }
-
-            qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
-            leverageFixed = true;
-            break;
-
-        } else if (levRes?.code === '59102') {
-
-            if (currentLeverage > 50) currentLeverage = 50;
-            else if (currentLeverage > 30) currentLeverage = 30;
-            else if (currentLeverage > 20) currentLeverage = 20;
-            else if (currentLeverage > 10) currentLeverage = 10;
-            else break;
-
-            log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x`);
-
-        } else {
-            log(`❌ Set leverage lỗi: ${levRes?.code} ${levRes?.msg || ''}`);
+        if (qty < minSz) {
+            log(`⚠️ ${instId}: Vốn ${capital} USDT không đủ để mở vị thế tối thiểu ở đòn bẩy ${currentLeverage}x.`);
             return null;
         }
-    }
 
-    if (!leverageFixed) return null;
+        qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
+        leverageFixed = true;
+        break;
+
+    } else if (levRes?.code === '59102') {
+        log(`🔄 ${instId}: Đòn bẩy ${targetLev}x vượt giới hạn sàn, đang thử hạ xuống mức thấp hơn...`);
+        continue; // Tiếp tục thử mốc thấp hơn trong hàng đợi
+    } else {
+        log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
+        return null;
+    }
+}
+
+if (!leverageFixed) {
+    log(`❌ ${instId}: Không thể thiết lập đòn bẩy phù hợp (giới hạn rủi ro hoặc vốn quá nhỏ).`);
+    return null;
+}
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
 const attachAlgoOrds = [
