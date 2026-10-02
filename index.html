@@ -926,6 +926,27 @@ async function handleHit(inst, wasPump, reason){
     }
   } catch(err) {}
   
+  // 1. Cập nhật trạng thái coin cũ thành closed trong positions
+  if(activeOrders[inst]){
+    const closedOrder = await closeOrder(inst, reason);
+    
+    if(!closedOrder){
+      log(`❌ ${inst}: Chưa xác nhận đóng vị thế thực tế trên OKX → không replace.`);
+      return;
+    }
+  } else {
+    if(positions[inst]){
+      positions[inst].status = 'closed';
+      positions[inst].hitTime = Date.now();
+    }
+  }
+  
+  if(positions[inst]){
+    positions[inst].status = 'closed';
+    positions[inst].hitTime = Date.now();
+  }
+  
+  // 2. Loại bỏ khỏi top hiện tại và danh sách subscribe websocket cũ
   topPump = topPump.filter(i => i !== inst);
   topDump = topDump.filter(i => i !== inst);
   subscribedInsts = subscribedInsts.filter(i => i !== inst);
@@ -937,12 +958,16 @@ async function handleHit(inst, wasPump, reason){
     replacementCandidate = pool.find(c => 
       c.delta > 0 && 
       !topPump.includes(c.inst) && 
+      !activeOrders[c.inst] &&
+      c.inst !== inst &&
       (!positions[c.inst] || positions[c.inst].status === 'open')
     );
   } else {
     replacementCandidate = pool.find(c => 
       c.delta < 0 && 
       !topDump.includes(c.inst) && 
+      !activeOrders[c.inst] &&
+      c.inst !== inst &&
       (!positions[c.inst] || positions[c.inst].status === 'open')
     );
   }
@@ -961,7 +986,7 @@ async function handleHit(inst, wasPump, reason){
     if(wasPump){
       topPump.push(replacementCandidate.inst);
     } else {
-      topDump.push(replacementCandidate.inst);
+    topDump.push(replacementCandidate.inst);
     }
     
     log(`Thay thế ${inst} bằng ${replacementCandidate.base} (${wasPump ? 'Pump' : 'Dump'})`);
@@ -970,14 +995,31 @@ async function handleHit(inst, wasPump, reason){
 
     if (isTrading) {
       const tradeSide = wasPump ? 'buy' : 'sell';
-      placeOrder(replacementCandidate.inst, tradeSide, replacementCandidate.last, replacementCandidate.sl, replacementCandidate.tp)
-        .then(order => {
-          if (order) positions[replacementCandidate.inst].hasOrder = true;
-        });
+      
+      try {
+        const order = await placeOrder(
+          replacementCandidate.inst,
+          tradeSide,
+          replacementCandidate.last,
+          replacementCandidate.sl,
+          replacementCandidate.tp
+        );
+        
+        if (order) {
+          positions[replacementCandidate.inst].hasOrder = true;
+        } else {
+          positions[replacementCandidate.inst].hasOrder = false;
+          log(`⚠️ ${replacementCandidate.inst}: Replace thất bại, không có lệnh thực tế trên OKX.`);
+        }
+      } catch(err) {
+        positions[replacementCandidate.inst].hasOrder = false;
+        log(`❌ Lỗi replace ${replacementCandidate.inst}: ${err?.message || err}`);
+      }
     }
 
   } else {
     log(`Không tìm thấy replacement cho ${inst}`);
+    renderAll();
   }
 }
 
