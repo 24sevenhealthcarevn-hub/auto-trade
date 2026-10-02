@@ -263,27 +263,57 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
   const leverage = parseInt(document.getElementById('leverage').value);
 
   // 1. KIỂM TRA ĐẦU VÀO (CAPITAL, LEVERAGE, API KEYS)
-  if (!capital || capital <= 0) {
-    log("❌ Vốn không hợp lệ");
-    return null;
-  }
-  if (!leverage || leverage < 1) {
-    log("❌ Đòn bẩy không hợp lệ");
-    return null;
-  }
+if (!capital || capital <= 0) {
+  log("❌ Vốn không hợp lệ");
+  return null;
+}
 
-  if (!apiKey) {
-    log('❌ Chưa cấu hình API Keys cho trading');
-    return null;
-  }
+if (!leverage || leverage < 1) {
+  log("❌ Đòn bẩy không hợp lệ");
+  return null;
+}
 
-  if (Object.keys(activeOrders).length >= 10) {
-    log(`⚠️ Đã đạt giới hạn tối đa 10 vị thế. Không mở thêm ${instId}`);
-    return null;
+if (!apiKey) {
+  log('❌ Chưa cấu hình API Keys cho trading');
+  return null;
+}
+
+// 2. ĐỒNG BỘ VỊ THẾ THỰC TẾ TỪ OKX
+if (!positionsData || positionsData.code !== '0' || !Array.isArray(positionsData.data)) {
+  log(`❌ Không thể xác minh vị thế OKX. Hủy mở lệnh ${instId} để tránh vượt giới hạn.`);
+  return null;
+}
+
+const okxPositions = positionsData.data.filter(p =>
+  Number(p.pos) !== 0 &&
+  p.instId.endsWith('-USDT-SWAP')
+);
+
+// 3. KIỂM TRA GIỚI HẠN TỐI ĐA 10 VỊ THẾ
+const totalPositions = okxPositions.length;
+
+if (totalPositions >= 10) {
+  log(`⚠️ OKX đang có ${totalPositions}/10 vị thế. Không mở thêm ${instId}`);
+  return null;
+}
+
+// 4. ĐỒNG BỘ VỊ THẾ CŨ VÀO BOT
+for (const p of okxPositions) {
+  if (!activeOrders[p.instId]) {
+    activeOrders[p.instId] = {
+      instId: p.instId,
+      pos: p.pos,
+      posSide: p.posSide,
+      avgPx: p.avgPx,
+      syncedFromOKX: true
+    };
   }
+}
+
+log(`✅ OKX hiện có ${totalPositions}/10 vị thế. Cho phép xem xét mở ${instId}.`);
   
   try {
-    // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
+    // 5. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
     const instRes = await safeFetch(`${OKX_API_BASE}/public/instruments?instType=SWAP&instId=${instId}`);
     const info = instRes?.data?.[0];
     if (!info) return null;
@@ -337,7 +367,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
 
     if (!leverageFixed) return null;
 
-    // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
+    // 6. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
     const attachAlgoOrds = [
         {
             "algoOrdType": "take_profit",
@@ -353,7 +383,7 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
         }
     ];
 
-    // 4. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
+    // 7. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
     const orderResult = await okxApiRequest('/trade/order', 'POST', {
       instId,
       tdMode: 'cross',             
