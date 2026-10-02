@@ -277,6 +277,11 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
     return null;
   }
 
+  if (Object.keys(activeOrders).length >= 10) {
+    log(`⚠️ Đã đạt giới hạn tối đa 10 vị thế. Không mở thêm ${instId}`);
+    return null;
+  }
+  
   try {
     // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
     const instRes = await safeFetch(`${OKX_API_BASE}/public/instruments?instType=SWAP&instId=${instId}`);
