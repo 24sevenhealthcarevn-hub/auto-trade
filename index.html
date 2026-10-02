@@ -439,11 +439,23 @@ async function closeOrder(instId, reason) {
     
     // --- Cập nhật trạng thái nội bộ (Internal State Update) ---
     
+    await new Promise(r => setTimeout(r, 500));
+
     // 3. Tính PnL (Dựa trên giá đóng cửa hiện tại)
     const currentPrice = positions[instId]?.last || order.price;
     let pnl = 0;
 
-    if (order.side === 'buy') {
+    const fillsResult = await okxApiRequest(`/trade/fills?instId=${instId}&limit=5`, 'GET', null);
+    if (fillsResult && fillsResult.code === '0' && fillsResult.data?.length > 0) {
+      const lastFill = fillsResult.data[0];
+      if (lastFill && lastFill.pnl !== undefined && lastFill.pnl !== '') {
+        pnl = parseFloat(lastFill.pnl);
+      } else if (order.side === 'buy') {
+        pnl = (currentPrice - entryPrice) * posSize;
+      } else {
+        pnl = (entryPrice - currentPrice) * posSize;
+      }
+    } else if (order.side === 'buy') {
       pnl = (currentPrice - entryPrice) * posSize;
     } else {
       pnl = (entryPrice - currentPrice) * posSize;
@@ -456,7 +468,7 @@ async function closeOrder(instId, reason) {
       closePrice: currentPrice,
       closeTime: Date.now(),
       pnl,
-      status: reason.toLowerCase(),
+      status: pnl >= 0 ? 'tp' : 'sl',
       reason: isManuallyClosed ? reason : `${reason} (Server)`
     };
     
