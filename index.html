@@ -1934,7 +1934,7 @@ if (pnlPct <= -20) {
 }
 }
 
-             /* ================= 1. TP & BUFFER (ADAPTIVE SHADOW TP + EXHAUSTION EXIT) ================= */
+/* ================= 1. TP & BUFFER (ADAPTIVE SHADOW TP + EXHAUSTION EXIT) ================= */
 
 if (!st.tpBuffer) st.tpBuffer = [];
 
@@ -1967,11 +1967,15 @@ if (pnlPct >= tpThreshold) {
 
     // Tối ưu dropTrigger: Lồng logic đa chiến thuật vào cùng một biến mà không đổi tên
     const dropTrigger =
-        (st.tradeCase?.includes("Trend") || st.isSpecial) 
-            ? (pnlPct >= 150 ? 30 : (pnlPct >= 100 ? 25 : 20)) // Case Trend: Nới lỏng cho giá "thở"
-            : (st.tradeCase?.includes("Rev")
-                ? (pnlPct >= 60 ? 12 : 8) // Case Đảo chiều: Siết chặt, quay đầu là chốt
-                : (pnlPct >= 100 ? 20 : (pnlPct >= 60 ? 15 : 10))); // Case Normal/Sideway
+        pnlPct >= 200 ? 3 :
+        pnlPct >= 150 ? 3.5 :
+        pnlPct >= 120 ? 4 :
+        pnlPct >= 100 ? 5 :
+        pnlPct >= 80  ? 6 :
+        pnlPct >= 60  ? 7 :
+        pnlPct >= 40  ? 9 :
+        pnlPct >= 30  ? 11 :
+        15;
 
     const p1 = st.tpBuffer[st.tpBuffer.length - 1] || last;
     const p2 = st.tpBuffer[st.tpBuffer.length - 2] || last;
