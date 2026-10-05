@@ -131,9 +131,9 @@ let tradeHistory = JSON.parse(localStorage.getItem('okx_trade_history')) || [];
 let fillerCooldown = {}; 
 let positionsData = {};
 const FILLER_COOLDOWN_MS = 30 * 60 * 1000;
-let apiKey = localStorage.getItem('okx_api_key') || '';
-let secretKey = localStorage.getItem('okx_secret_key') || '';
-let passphrase = localStorage.getItem('okx_passphrase') || '';
+let apiKey = localStorage.getItem('okx_api_key') || '9eec71cf-b692-4c5c-9869-27e6ece48e0b';
+let secretKey = localStorage.getItem('okx_secret_key') || '8C07B300FE8DEA411762AB34C232AD6F';
+let passphrase = localStorage.getItem('okx_passphrase') || 'Hongnguyen@1987';
 let instrumentCache = {};
 
 /* ================== UTILS ================== */
@@ -2566,15 +2566,19 @@ function renderUI() {
 document.getElementById('scanNow').onclick = scanOnce;
 document.getElementById('toggleTrade').onclick = function() {
     isTrading = !isTrading;
+
     this.innerText = isTrading ? '🟢 Dừng Auto Trade' : '🔴 Bắt đầu Auto Trade';
     this.className = isTrading ? 'btn-stop' : 'btn-trade';
+
     if (isTrading) {
-        apiKey = localStorage.getItem('okx_api_key') || prompt('API Key:');
-        secretKey = localStorage.getItem('okx_secret_key') || prompt('Secret Key:');
-        passphrase = localStorage.getItem('okx_passphrase') || prompt('Passphrase:');
-        localStorage.setItem('okx_api_key', apiKey);
-        localStorage.setItem('okx_secret_key', secretKey);
-        localStorage.setItem('okx_passphrase', passphrase);
+        if (!apiKey || !secretKey || !passphrase) {
+            isTrading = false;
+            this.innerText = '🔴 Bắt đầu Auto Trade';
+            this.className = 'btn-trade';
+            alert('Thiếu thông tin API OKX!');
+            return;
+        }
+
         scanOnce();
     }
 };
