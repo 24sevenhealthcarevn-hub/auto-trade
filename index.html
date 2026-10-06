@@ -1858,7 +1858,7 @@ for (const id in activeOrders) {
                 st.currentSL = st.currentSL || st.sl || 0;
 
                 /* ================= CẮT LỖ KHẨN CẤP (KẾT HỢP 2 LOGIC) ================= */
-if (false) {
+
 // Hard stop -50% (giữ nguyên nguyên tắc cũ)
 if (pnlPct <= -50) {
     console.log(`⚠️ [HARD STOP] ${instId} đạt -50%. Đóng vị thế...`);
@@ -1882,8 +1882,8 @@ if (pnlPct <= -50) {
         continue;
     }
 }
-
-/* ================= SOFT STOP: -15% + PATTERN (LOGIC BẢN 2) ================= */
+if (false) {
+/* ================= SOFT STOP: -20% + PATTERN (LOGIC BẢN 2) ================= */
 if (pnlPct <= -20) {
     try {
         const candleRes = await okxApiRequest(`/market/candles?instId=${instId}&bar=15m&limit=2`);
