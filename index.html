@@ -1955,7 +1955,7 @@ let tpThreshold = 10; // Hạ xuống 30% PNL để bắt đầu theo dõi đỉ
 if (pnlPct >= tpThreshold) {
 
     // FIX: Không gán null, giữ st.tp để lệnh chốt lời luôn treo trên sàn
-    finalTP = st.tp; 
+    finalTP = st.tp;
     forceSLtoOldTP = true;
 
     const peakPrice = st.tpBuffer[0];
@@ -1965,48 +1965,21 @@ if (pnlPct >= tpThreshold) {
         ? (peakPrice - last) / peakPrice * 100 * leverage
         : (last - peakPrice) / peakPrice * 100 * leverage;
 
+    // PNL đỉnh thực tế của lệnh
+    const peakPnlPct = isLong
+        ? (peakPrice - entry) / entry * 100 * leverage
+        : (entry - peakPrice) / entry * 100 * leverage;
+
     // Tối ưu dropTrigger: Lồng logic đa chiến thuật vào cùng một biến mà không đổi tên
     const dropTrigger =
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 200 ? 3 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 150 ? 3.5 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 120 ? 4 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 100 ? 5 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 80 ? 6 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 60 ? 7 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 40 ? 9 :
-        (
-            (isLong
-                ? (peakPrice - entry) / entry * 100 * leverage
-                : (entry - peakPrice) / entry * 100 * leverage)
-        ) >= 30 ? 11 :
+        peakPnlPct >= 200 ? 3 :
+        peakPnlPct >= 150 ? 3.5 :
+        peakPnlPct >= 120 ? 4 :
+        peakPnlPct >= 100 ? 5 :
+        peakPnlPct >= 80  ? 6 :
+        peakPnlPct >= 60  ? 7 :
+        peakPnlPct >= 40  ? 9 :
+        peakPnlPct >= 30  ? 11 :
         15;
 
     const p1 = st.tpBuffer[st.tpBuffer.length - 1] || last;
@@ -2015,11 +1988,52 @@ if (pnlPct >= tpThreshold) {
     // Exhaustion nhạy bén: Chỉ cần nến hiện tại đi ngược nến trước
     const exhaustion = isLong ? (p1 < p2) : (p1 > p2);
 
+    // ================= BLACK SWAN / MONEY EXHAUSTION =================
+
+    const awayFromPeak = isLong
+        ? last < peakPrice
+        : last > peakPrice;
+
+    const meaningfulPullback =
+        dropFromPeak >= 3 &&
+        (isLong ? last < peakPrice : last > peakPrice);
+
+    const momentumWeak =
+        isLong
+            ? (p1 < p2)
+            : (p1 > p2);
+
+    const moneyExhaustion =
+        momentumWeak &&
+        (
+            (
+                Number.isFinite(Number(st.volSpread)) &&
+                Number(st.volSpread) <= 0.80
+            ) ||
+            (
+                Number.isFinite(Number(st.rsi)) &&
+                (
+                    isLong
+                        ? Number(st.rsi) >= 70
+                        : Number(st.rsi) <= 30
+                )
+            )
+        );
+
+    /*
+     * ================= DYNAMIC TP =================
+     *
+     * PNL càng cao → gap càng chặt.
+     * Không chờ xác nhận nến.
+     */
     if (
-        dropFromPeak >= dropTrigger && 
-        (isLong ? last < peakPrice : last > peakPrice)
+        dropFromPeak >= dropTrigger &&
+        awayFromPeak
     ) {
-        console.log(`🎯 [10x-20x TP] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% (Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh)`);
+        console.log(
+            `🎯 [10x-20x TP] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` +
+            `(Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh ${peakPnlPct.toFixed(2)}%, gap ${dropTrigger}%)`
+        );
 
         const closeRes = await okxApiRequest('/trade/order', 'POST', {
             instId,
@@ -2031,14 +2045,25 @@ if (pnlPct >= tpThreshold) {
         });
 
         if (closeRes?.code === '0') {
-            const msg = `💰 **SIÊU BOT TP (10x-20x): ${instId}**\n` +
-                        `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
-                        `🏆 Đã chốt khi giá quay đầu từ đỉnh.`;
+            const msg =
+                `💰 **SIÊU BOT TP (10x-20x): ${instId}**\n` +
+                `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
+                `🏆 Peak: ${peakPnlPct.toFixed(2)}%\n` +
+                `📉 Rơi từ đỉnh: ${dropFromPeak.toFixed(2)}%\n` +
+                `🛡️ Gap: ${dropTrigger}%`;
 
-            if (typeof sendTelegram === 'function') sendTelegram(msg).catch(() => {});
-            if (typeof fillerCooldown !== 'undefined') fillerCooldown[instId] = Date.now();
+            if (typeof sendTelegram === 'function')
+                sendTelegram(msg).catch(() => {});
+
+            if (typeof fillerCooldown !== 'undefined')
+                fillerCooldown[instId] = Date.now();
+
             delete activeOrders[instId];
-            localStorage.setItem('okx_active_orders', JSON.stringify(activeOrders));
+            localStorage.setItem(
+                'okx_active_orders',
+                JSON.stringify(activeOrders)
+            );
+
             continue;
         }
     }
@@ -2089,6 +2114,7 @@ if (pnlPct >= tpThreshold) {
             continue;
         }
     }
+
 } else {
     finalTP = st.tp || st.currentTP;
 }
