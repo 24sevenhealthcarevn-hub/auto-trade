@@ -1945,7 +1945,7 @@ if (isLong && last > st.tpBuffer[0]) st.tpBuffer[0] = last;
 if (!isLong && last < st.tpBuffer[0]) st.tpBuffer[0] = last;
 
 st.tpBuffer.push(last);
-if (st.tpBuffer.length > 120) st.tpBuffer.shift();
+if (st.tpBuffer.length > 120) st.tpBuffer.splice(1, 1);
 
 let finalTP = st.tp;
 let forceSLtoOldTP = false;
@@ -1967,14 +1967,46 @@ if (pnlPct >= tpThreshold) {
 
     // Tối ưu dropTrigger: Lồng logic đa chiến thuật vào cùng một biến mà không đổi tên
     const dropTrigger =
-        pnlPct >= 200 ? 3 :
-        pnlPct >= 150 ? 3.5 :
-        pnlPct >= 120 ? 4 :
-        pnlPct >= 100 ? 5 :
-        pnlPct >= 80  ? 6 :
-        pnlPct >= 60  ? 7 :
-        pnlPct >= 40  ? 9 :
-        pnlPct >= 30  ? 11 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 200 ? 3 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 150 ? 3.5 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 120 ? 4 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 100 ? 5 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 80 ? 6 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 60 ? 7 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 40 ? 9 :
+        (
+            (isLong
+                ? (peakPrice - entry) / entry * 100 * leverage
+                : (entry - peakPrice) / entry * 100 * leverage)
+        ) >= 30 ? 11 :
         15;
 
     const p1 = st.tpBuffer[st.tpBuffer.length - 1] || last;
@@ -1985,8 +2017,7 @@ if (pnlPct >= tpThreshold) {
 
     if (
         dropFromPeak >= dropTrigger && 
-        (isLong ? last < peakPrice : last > peakPrice) && 
-        exhaustion
+        (isLong ? last < peakPrice : last > peakPrice)
     ) {
         console.log(`🎯 [10x-20x TP] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% (Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh)`);
 
@@ -2011,9 +2042,57 @@ if (pnlPct >= tpThreshold) {
             continue;
         }
     }
+
+    /* ================= THIÊN NGA ĐEN / TP ATR KHÔNG VỚI TỚI ================= */
+
+    if (
+        st.isSpecial &&
+        pnlPct >= 30 &&
+        awayFromPeak &&
+        meaningfulPullback &&
+        momentumWeak &&
+        moneyExhaustion
+    ) {
+        console.log(
+            `🎯 [BLACK SWAN EXHAUSTION] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` +
+            `(TP ATR quá xa, dòng tiền đã kiệt sức)`
+        );
+
+        const closeRes = await okxApiRequest('/trade/order', 'POST', {
+            instId,
+            tdMode: 'cross',
+            side: isLong ? 'sell' : 'buy',
+            posSide: isLong ? 'long' : 'short',
+            ordType: 'market',
+            sz: posQty.toString()
+        });
+
+        if (closeRes?.code === '0') {
+            const msg =
+                `💰 **SIÊU BOT BLACK SWAN TP: ${instId}**\n` +
+                `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
+                `🎯 TP ATR quá xa\n` +
+                `💧 Dòng tiền kiệt sức → chốt lợi nhuận.`;
+
+            if (typeof sendTelegram === 'function')
+                sendTelegram(msg).catch(() => {});
+
+            if (typeof fillerCooldown !== 'undefined')
+                fillerCooldown[instId] = Date.now();
+
+            delete activeOrders[instId];
+            localStorage.setItem(
+                'okx_active_orders',
+                JSON.stringify(activeOrders)
+            );
+
+            continue;
+        }
+    }
 } else {
     finalTP = st.tp || st.currentTP;
 }
+
 
                 /* ================= 2. SL TRAILING & BUFFER (NÂNG CẤP XÁC NHẬN NẾN) ================= */
 let proposedSL = null; 
