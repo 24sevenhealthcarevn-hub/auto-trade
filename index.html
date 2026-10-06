@@ -1940,10 +1940,12 @@ if (isLong ? last > st.tpBuffer[0] : last < st.tpBuffer[0]) st.tpBuffer[0] = las
 st.tpBuffer.push(last); 
 if (st.tpBuffer.length > 120) st.tpBuffer.splice(1, 1); 
 
-let finalTP = st.tp; 
+let finalTP = st.tp;
+let forceSLtoOldTP = false;
 const tpThreshold = 10; 
 
 if (pnlPct >= tpThreshold || st.peakPrice) { 
+    forceSLtoOldTP = true;
     finalTP = st.tp; 
 
     if (!st.peakPrice) st.peakPrice = last; 
