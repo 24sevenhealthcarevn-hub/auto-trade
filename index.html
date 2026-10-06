@@ -1935,254 +1935,161 @@ if (pnlPct <= -20) {
 }
               
 /* ================= 1. TP & BUFFER (ADAPTIVE SHADOW TP + EXHAUSTION EXIT) ================= */ 
- 
-if (!st.tpBuffer) st.tpBuffer = []; 
- 
-if (!st.tpBuffer.length) st.tpBuffer[0] = last; 
- 
-// Lưu đỉnh (Peak Price) tại index 0 
-if (isLong && last > st.tpBuffer[0]) st.tpBuffer[0] = last; 
-if (!isLong && last < st.tpBuffer[0]) st.tpBuffer[0] = last; 
- 
+if (!st.tpBuffer) st.tpBuffer = [last]; 
+if (isLong ? last > st.tpBuffer[0] : last < st.tpBuffer[0]) st.tpBuffer[0] = last; 
 st.tpBuffer.push(last); 
 if (st.tpBuffer.length > 120) st.tpBuffer.splice(1, 1); 
- 
+
 let finalTP = st.tp; 
-let forceSLtoOldTP = false; 
- 
-let tpThreshold = 10; // Hạ xuống 30% PNL để bắt đầu theo dõi đỉnh sớm hơn 
- 
-/* 
- * FIX: Một khi TP động đã kích hoạt thì phải tiếp tục bảo vệ 
- * kể cả khi PNL hiện tại tụt xuống dưới tpThreshold. 
- */ 
+const tpThreshold = 10; 
+
 if (pnlPct >= tpThreshold || st.peakPrice) { 
- 
-    // FIX: Không gán null, giữ st.tp để lệnh chốt lời luôn treo trên sàn 
     finalTP = st.tp; 
-    forceSLtoOldTP = true; 
- 
-    /* 
-     * FIX: Lưu Peak bền trong st.peakPrice. 
-     * Không để việc giới hạn tpBuffer 120 mẫu làm mất Peak. 
-     */ 
-    if (!st.peakPrice) { 
-        st.peakPrice = last; 
-    } 
- 
-    if (isLong && last > st.peakPrice) st.peakPrice = last; 
-    if (!isLong && last < st.peakPrice) st.peakPrice = last; 
- 
+
+    if (!st.peakPrice) st.peakPrice = last; 
+    if (isLong ? last > st.peakPrice : last < st.peakPrice) st.peakPrice = last; 
+
     const peakPrice = st.peakPrice || st.tpBuffer[0]; 
- 
-    // Tính % sụt giảm PNL từ đỉnh 
-    const dropFromPeak = isLong 
-        ? (peakPrice - last) / peakPrice * 100 * leverage 
-        : (last - peakPrice) / peakPrice * 100 * leverage; 
- 
-    // PNL đỉnh thực tế của lệnh 
-    const peakPnlPct = isLong 
-        ? (peakPrice - entry) / entry * 100 * leverage 
-        : (entry - peakPrice) / entry * 100 * leverage; 
- 
-    // Tối ưu dropTrigger: Lồng logic đa chiến thuật vào cùng một biến mà không đổi tên 
-    const dropTrigger = Math.min( 
- 
-        /* 
-         * GAP THEO PNL ĐỈNH: 
-         * PNL càng cao → GAP càng chặt. 
-         */ 
+
+    const dropFromPeak = 
+        (isLong ? peakPrice - last : last - peakPrice) / peakPrice * 100 * leverage; 
+
+    const peakPnlPct = 
+        (isLong ? peakPrice - entry : entry - peakPrice) / entry * 100 * leverage; 
+
+    // Gap theo PNL đỉnh
+    let dropTrigger = 
         peakPnlPct >= 200 ? 3 : 
         peakPnlPct >= 150 ? 3.5 : 
         peakPnlPct >= 120 ? 4 : 
         peakPnlPct >= 100 ? 5 : 
-        peakPnlPct >= 80  ? 6 : 
-        peakPnlPct >= 60  ? 7 : 
-        peakPnlPct >= 40  ? 9 : 
-        peakPnlPct >= 30  ? 11 : 
-        15, 
- 
-        /* 
-         * GAP THEO BOLLINGER: 
-         * Peak càng vượt Bollinger → GAP càng chặt. 
-         */ 
-        isLong && 
-        Number.isFinite(Number(st.upperBB)) && 
-        Number(st.upperBB) > 0 && 
-        peakPrice > Number(st.upperBB) 
- 
-            ? ( 
-                (peakPrice - Number(st.upperBB)) / Number(st.upperBB) * 100 >= 3 ? 2.5 : 
-                (peakPrice - Number(st.upperBB)) / Number(st.upperBB) * 100 >= 2 ? 3.5 : 
-                (peakPrice - Number(st.upperBB)) / Number(st.upperBB) * 100 >= 1 ? 5 : 
-                (peakPrice - Number(st.upperBB)) / Number(st.upperBB) * 100 >= 0.5 ? 7 : 
-                15 
-            ) 
- 
-            : !isLong && 
-              Number.isFinite(Number(st.lowerBB)) && 
-              Number(st.lowerBB) > 0 && 
-              peakPrice < Number(st.lowerBB) 
- 
-            ? ( 
-                (Number(st.lowerBB) - peakPrice) / Number(st.lowerBB) * 100 >= 3 ? 2.5 : 
-                (Number(st.lowerBB) - peakPrice) / Number(st.lowerBB) * 100 >= 2 ? 3.5 : 
-                (Number(st.lowerBB) - peakPrice) / Number(st.lowerBB) * 100 >= 1 ? 5 : 
-                (Number(st.lowerBB) - peakPrice) / Number(st.lowerBB) * 100 >= 0.5 ? 7 : 
-                15 
-            ) 
- 
-            : 15 
-    ); 
- 
+        peakPnlPct >= 80 ? 6 : 
+        peakPnlPct >= 60 ? 7 : 
+        peakPnlPct >= 40 ? 9 : 
+        peakPnlPct >= 30 ? 11 : 
+        15; 
+
+    // Gap theo Bollinger Bands
+    const bb = isLong ? Number(st.upperBB) : Number(st.lowerBB); 
+
+    if (
+        Number.isFinite(bb) && 
+        bb > 0 && 
+        (isLong ? peakPrice > bb : peakPrice < bb)
+    ) { 
+        const bbDist = Math.abs(peakPrice - bb) / bb * 100; 
+
+        const bbDrop = 
+            bbDist >= 3 ? 2.5 : 
+            bbDist >= 2 ? 3.5 : 
+            bbDist >= 1 ? 5 : 
+            bbDist >= 0.5 ? 7 : 
+            15; 
+
+        dropTrigger = Math.min(dropTrigger, bbDrop); 
+    } 
+
     const p1 = st.tpBuffer[st.tpBuffer.length - 1] || last; 
     const p2 = st.tpBuffer[st.tpBuffer.length - 2] || last; 
- 
-    // Exhaustion nhạy bén: Chỉ cần nến hiện tại đi ngược nến trước 
-    const exhaustion = isLong ? (p1 < p2) : (p1 > p2); 
- 
-    // ================= BLACK SWAN / MONEY EXHAUSTION ================= 
- 
+
     const awayFromPeak = isLong 
         ? last < peakPrice 
         : last > peakPrice; 
- 
+
     const meaningfulPullback = 
-        dropFromPeak >= 3 && 
-        (isLong ? last < peakPrice : last > peakPrice); 
- 
-    const momentumWeak = 
-        isLong 
-            ? (p1 < p2) 
-            : (p1 > p2); 
- 
+        (
+            isLong 
+                ? (peakPrice - last) / peakPrice * 100 >= 3 
+                : (last - peakPrice) / peakPrice * 100 >= 3
+        ) && awayFromPeak; 
+
+    const momentumWeak = isLong 
+        ? p1 < p2 
+        : p1 > p2; 
+
     const moneyExhaustion = 
-        momentumWeak && 
-        ( 
-            ( 
+        momentumWeak && (
+            (
                 Number.isFinite(Number(st.volSpread)) && 
-                Number(st.volSpread) <= 0.80 
+                Number(st.volSpread) <= 0.80
             ) || 
-            ( 
+            (
                 Number.isFinite(Number(st.rsi)) && 
-                ( 
+                (
                     isLong 
                         ? Number(st.rsi) >= 70 
-                        : Number(st.rsi) <= 30 
-                ) 
-            ) 
+                        : Number(st.rsi) <= 30
+                )
+            )
         ); 
- 
-    /* 
-     * ================= DYNAMIC TP ================= 
-     * 
-     * PNL càng cao → gap càng chặt. 
-     * Không chờ xác nhận nến. 
-     * 
-     * ================= BLACK SWAN ================= 
-     * 
-     * st.isSpecial = Black Swan / Thiên nga đen. 
-     * Giá chạy bất thường/mạnh, TP ATR ban đầu có thể quá xa. 
-     * Khi dòng tiền thực sự suy yếu → chốt lợi nhuận. 
-     */ 
-    if ( 
-        ( 
-            dropFromPeak >= dropTrigger && 
-            awayFromPeak 
-        ) 
-        || 
-        ( 
-            st.isSpecial && 
-            pnlPct >= 30 && 
-            awayFromPeak && 
-            meaningfulPullback && 
-            momentumWeak && 
-            moneyExhaustion && 
-            Number.isFinite(Number(st.tp)) && 
-            Number(st.tp) > 0 && 
-            ( 
-                isLong 
-                    ? ((Number(st.tp) - last) / last * 100 >= 1) 
-                    : ((last - Number(st.tp)) / last * 100 >= 1) 
-            ) 
-        ) 
+
+    const isBlackSwanExit = 
+        st.isSpecial && 
+        pnlPct >= 30 && 
+        awayFromPeak && 
+        meaningfulPullback && 
+        momentumWeak && 
+        moneyExhaustion && 
+        Number.isFinite(Number(st.tp)) && 
+        Number(st.tp) > 0 && 
+        (
+            isLong 
+                ? (Number(st.tp) - last) / last * 100 >= 1 
+                : (last - Number(st.tp)) / last * 100 >= 1
+        ); 
+
+    if (
+        (dropFromPeak >= dropTrigger && awayFromPeak) || 
+        isBlackSwanExit
     ) { 
- 
-        console.log( 
-            st.isSpecial && 
-            pnlPct >= 30 && 
-            awayFromPeak && 
-            meaningfulPullback && 
-            momentumWeak && 
-            moneyExhaustion && 
-            Number.isFinite(Number(st.tp)) && 
-            Number(st.tp) > 0 && 
-            ( 
-                isLong 
-                    ? ((Number(st.tp) - last) / last * 100 >= 1) 
-                    : ((last - Number(st.tp)) / last * 100 >= 1) 
-            ) 
- 
-            ? `🎯 [BLACK SWAN EXHAUSTION] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` + 
-              `(TP ATR quá xa, dòng tiền đã kiệt sức)` 
- 
-            : `🎯 [10x-20x TP] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` + 
-              `(Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh ${peakPnlPct.toFixed(2)}%, gap ${dropTrigger}%)` 
+
+        console.log(
+            isBlackSwanExit 
+                ? `🎯 [BLACK SWAN EXHAUSTION] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}%` 
+                : `🎯 [10x-20x TP] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` +
+                  `(Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh ${peakPnlPct.toFixed(2)}%, gap ${dropTrigger}%)`
         ); 
- 
+
         const closeRes = await okxApiRequest('/trade/order', 'POST', { 
             instId, 
             tdMode: 'cross', 
             side: isLong ? 'sell' : 'buy', 
             posSide: isLong ? 'long' : 'short', 
             ordType: 'market', 
-            sz: posQty.toString() 
+            sz: (typeof posQty !== 'undefined' ? posQty : st.sz).toString() 
         }); 
- 
+
         if (closeRes?.code === '0') { 
- 
-            const msg = 
-                st.isSpecial && 
-                pnlPct >= 30 && 
-                awayFromPeak && 
-                meaningfulPullback && 
-                momentumWeak && 
-                moneyExhaustion && 
-                Number.isFinite(Number(st.tp)) && 
-                Number(st.tp) > 0 && 
-                ( 
-                    isLong 
-                        ? ((Number(st.tp) - last) / last * 100 >= 1) 
-                        : ((last - Number(st.tp)) / last * 100 >= 1) 
-                ) 
- 
-                ? `💰 **SIÊU BOT BLACK SWAN TP: ${instId}**\n` + 
-                  `📈 PNL: ${pnlPct.toFixed(2)}%\n` + 
-                  `🎯 TP ATR quá xa\n` + 
+
+            const msg = isBlackSwanExit 
+                ? `💰 **SIÊU BOT BLACK SWAN TP: ${instId}**\n` +
+                  `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
+                  `🎯 TP ATR quá xa\n` +
                   `💧 Dòng tiền kiệt sức → chốt lợi nhuận.` 
- 
-                : `💰 **SIÊU BOT TP (10x-20x): ${instId}**\n` + 
-                  `📈 PNL: ${pnlPct.toFixed(2)}%\n` + 
-                  `🏆 Peak: ${peakPnlPct.toFixed(2)}%\n` + 
-                  `📉 Rơi từ đỉnh: ${dropFromPeak.toFixed(2)}%\n` + 
+
+                : `💰 **SIÊU BOT TP (10x-20x): ${instId}**\n` +
+                  `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
+                  `🏆 Peak: ${peakPnlPct.toFixed(2)}%\n` +
+                  `📉 Rơi từ đỉnh: ${dropFromPeak.toFixed(2)}%\n` +
                   `🛡️ Gap: ${dropTrigger}%`; 
- 
+
             if (typeof sendTelegram === 'function') 
                 sendTelegram(msg).catch(() => {}); 
- 
+
             if (typeof fillerCooldown !== 'undefined') 
                 fillerCooldown[instId] = Date.now(); 
- 
+
             delete activeOrders[instId]; 
-            localStorage.setItem( 
+
+            localStorage.setItem(
                 'okx_active_orders', 
-                JSON.stringify(activeOrders) 
+                JSON.stringify(activeOrders)
             ); 
- 
+
             continue; 
         } 
     } 
- 
+
 } else { 
     finalTP = st.tp || st.currentTP; 
 }
