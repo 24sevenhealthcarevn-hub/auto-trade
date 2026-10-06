@@ -2095,50 +2095,30 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 }
 
 
-                /* ================= 2. SL TRAILING & BUFFER (NÂNG CẤP XÁC NHẬN NẾN) ================= */
+               /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
 let proposedSL = null; 
-const holdTimeMins = (Date.now() - st.ts) / 60000; // Tính thời gian giữ lệnh theo phút
-
-// CHẶN QUÉT NON: Chỉ bắt đầu Trailing khi lệnh đã chạy được ít nhất 5-10 phút 
-// hoặc PNL đã đạt một ngưỡng an toàn nhất định.
+const holdTimeMins = (Date.now() - st.ts) / 60000;
 const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10; 
 
-// SỬA LỖI CHỒNG CHÉO: Dùng cấu trúc else if phân cấp từ cao xuống thấp
+// 1. ƯU TIÊN CAO NHẤT: Khi TP động (Shadow TP) đã kích hoạt, khóa SL ngay theo cấu trúc đã định
 if (forceSLtoOldTP && st.tp) {
-    // Khi PNL >= 30%, gỡ TP và khóa chặt SL tại mức TP cũ
     proposedSL = +st.tp; 
 } 
-// B. REVERSAL: Đánh đảo chiều cần khóa lãi cực nhanh nhưng vẫn cần nến "thở"
-else if (st.tradeCase?.includes("Rev") && pnlPct >= 30) {
-    proposedSL = isLong
-        ? last - (st.atr * 1.5)
-        : last + (st.atr * 1.5);
+// 2. REVERSAL / LÃI CỰC LỚN (>= 50%): Siết cực chặt bằng ATR nhỏ hoặc bám đỉnh
+else if ((st.tradeCase?.includes("Rev") && pnlPct >= 30) || pnlPct >= 50) {
+    proposedSL = isLong ? last - (st.atr * 1.0) : last + (st.atr * 1.0); // Siết chặt 1.0 ATR
 }
-// C. TREND & SPECIAL: Lãi lớn (PNL >= 50% - Đã gỡ TP)
-else if (pnlPct >= 50) {
-    // Tinh chỉnh Gap để bám sát giá hơn khi gồng trend vô cực
-    proposedSL = isLong
-        ? last - (st.atr * 1.5)
-        : last + (st.atr * 1.5);
-}
-// D. LÃI TRUNG BÌNH (25% - 50%)
+// 3. LÃI TRUNG BÌNH CAO (25% - 50%) && Đã xác nhận thời gian
 else if (pnlPct >= 25 && isConfirmed) { 
-    let miniGap = 15; // Giữ Gap 15% (Ví dụ lãi 40% khóa 25%)
-    proposedSL = isLong
-        ? last - (st.atr * 1.5)
-        : last + (st.atr * 1.5);
+    proposedSL = isLong ? last - (st.atr * 1.5) : last + (st.atr * 1.5);
 }
-/* ---------- FIX: TRAILING KHI LÃI < 25% (ĐÃ GỘP ĐỂ TRÁNH GHI ĐÈ) ---------- */
-else if (pnlPct >= 10 && isConfirmed) {
-    // Giữ khoảng cách SL cách giá hiện tại một khoảng 15% (tránh râu nến)
-    proposedSL = isLong
-        ? last - (st.atr * 1.5)
-        : last + (st.atr * 1.5);
-}
-// E. BẢO VỆ VỐN (15%): Chỉ dời về Entry khi nến đã ổn định (>10p)
-else if (pnlPct >= 15 && isConfirmed) { 
-    // Dời về Entry + 0.1% để bảo toàn vốn
+// 4. LÃI KHỞI ĐẦU AN TOÀN (15% - 25%): Bảo toàn vốn, dời SL qua Entry + phí
+else if (pnlPct >= 15 && isConfirmed) {
     proposedSL = entry * (1 + (isLong ? 0.003 : -0.003)); 
+}
+// 5. GIA ĐOẠN ĐẦU (10% - 15%): Kê SL rộng hơn một chút để chống quét râu nến
+else if (pnlPct >= 10 && isConfirmed) {
+    proposedSL = isLong ? last - (st.atr * 2.0) : last + (st.atr * 2.0); // Dùng 2.0 ATR cho thoáng
 }
 
 /* ================= 3. ĐẢM BẢO SL CHỈ TIẾN KHÔNG LÙI (FIXED) ================= */
