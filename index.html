@@ -1590,29 +1590,6 @@ const pool = (qualityCandidates || [])
     .filter(p => p && p.instId)
     .sort((a, b) => Math.abs(b.delta || 0) - Math.abs(a.delta || 0));
 
-const remainingSlots = MAX_POSITIONS - openIds.size;
-
-if (remainingSlots <= 0) return;
-
-// Chia slot mới theo LONG / SHORT
-const longPool = pool.filter(p => p.side === 'buy');
-const shortPool = pool.filter(p => p.side === 'sell');
-
-const maxLong = Math.ceil(remainingSlots / 2);
-const maxShort = Math.floor(remainingSlots / 2);
-
-const selectedPool = [
-    ...longPool.slice(0, maxLong),
-    ...shortPool.slice(0, maxShort)
-];
-
-for (const p of selectedPool) {
-    if (openIds.size >= MAX_POSITIONS) break;
-    if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
-    if (openIds.has(p.instId)) continue;
-
-    // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
-
    /* ===============================
 * 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
 * =============================== */
@@ -1859,8 +1836,7 @@ for (const id in activeOrders) {
 
                 /* ================= CẮT LỖ KHẨN CẤP (KẾT HỢP 2 LOGIC) ================= */
 
-// Hard stop -50% (giữ nguyên nguyên tắc cũ)
-if (pnlPct <= -50) {
+if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
     console.log(`⚠️ [HARD STOP] ${instId} đạt -50%. Đóng vị thế...`);
 
     const closeRes = await okxApiRequest('/trade/order', 'POST', {
