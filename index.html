@@ -1493,7 +1493,28 @@ async function masterFlow(qualityCandidates) {
      * =============================== */
     const MAX_POSITIONS = 10;
     if (openIds.size >= MAX_POSITIONS) return;
+const remainingSlots = MAX_POSITIONS - openIds.size;
 
+if (remainingSlots <= 0) return;
+
+// Chia slot mới theo LONG / SHORT
+const longPool = pool.filter(p => p.side === 'buy');
+const shortPool = pool.filter(p => p.side === 'sell');
+
+const maxLong = Math.ceil(remainingSlots / 2);
+const maxShort = Math.floor(remainingSlots / 2);
+
+const selectedPool = [
+    ...longPool.slice(0, maxLong),
+    ...shortPool.slice(0, maxShort)
+];
+
+for (const p of selectedPool) {
+    if (openIds.size >= MAX_POSITIONS) break;
+    if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
+    if (openIds.has(p.instId)) continue;
+
+    // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
     /* =======================================================
      * 1.3. GẮN LẠI TP/SL (PROTECT) - CHẠY 24/24
      * ======================================================= */
