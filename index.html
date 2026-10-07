@@ -1589,7 +1589,28 @@ async function masterFlow(qualityCandidates) {
 const pool = (qualityCandidates || [])
     .filter(p => p && p.instId)
     .sort((a, b) => Math.abs(b.delta || 0) - Math.abs(a.delta || 0));
+const remainingSlots = MAX_POSITIONS - openIds.size;
 
+if (remainingSlots <= 0) return;
+
+// Chia slot mới theo LONG / SHORT
+const longPool = pool.filter(p => p.side === 'buy');
+const shortPool = pool.filter(p => p.side === 'sell');
+
+const maxLong = Math.ceil(remainingSlots / 5);
+const maxShort = Math.floor(remainingSlots / 5);
+
+const selectedPool = [
+    ...longPool.slice(0, maxLong),
+    ...shortPool.slice(0, maxShort)
+];
+
+for (const p of selectedPool) {
+    if (openIds.size >= MAX_POSITIONS) break;
+    if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
+    if (openIds.has(p.instId)) continue;
+
+    // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
    /* ===============================
 * 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
 * =============================== */
