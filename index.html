@@ -1928,11 +1928,15 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
     forceSLtoOldTP = true;
 
-    if (!st.peakPrice)
+    if (!st.peakPrice) {
         st.peakPrice = last;
+        st.peakTime = Date.now();
+    }
 
-    if (isLong ? last > st.peakPrice : last < st.peakPrice)
+    if (isLong ? last > st.peakPrice : last < st.peakPrice) {
         st.peakPrice = last;
+        st.peakTime = Date.now();
+    }
 
     const peakPrice = st.peakPrice || st.tpBuffer[0];
 
@@ -2034,18 +2038,85 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
 
     /* =======================================================
-     * 1.5 TP ĐỘNG
+     * 1.5 ĐỒNG BỘ TP ĐANG CÓ TRÊN SÀN
      *
-     * 10-30% CHỈ THEO DÕI.
+     * QUẢN LÝ CẢ:
+     * - LỆNH BOT
+     * - LỆNH BẰNG TAY
+     * - LỆNH CHỈ CÓ TP, KHÔNG CÓ SL
+     * ======================================================= */
+
+    if (!st.tpAlgoId) {
+
+        try {
+
+            const pendingTP =
+                await okxApiRequest(
+                    '/trade/orders-algo-pending',
+                    'GET',
+                    {
+                        instType: 'SWAP',
+                        ordType: 'conditional'
+                    }
+                );
+
+            const algoList =
+                Array.isArray(pendingTP?.data)
+                    ? pendingTP.data
+                    : [];
+
+            const tpOrder =
+                algoList.find(o =>
+                    o &&
+                    o.instId === instId &&
+                    Number(o.tpTriggerPx) > 0 &&
+                    (
+                        !o.posSide ||
+                        o.posSide === (isLong ? 'long' : 'short')
+                    )
+                );
+
+            if (tpOrder) {
+
+                st.tpAlgoId =
+                    tpOrder.algoId ||
+                    tpOrder.attachAlgoId ||
+                    null;
+
+                st.currentTP =
+                    Number(tpOrder.tpTriggerPx) > 0
+                        ? Number(tpOrder.tpTriggerPx)
+                        : st.currentTP || st.tp || null;
+
+                if (st.currentTP)
+                    finalTP = st.currentTP;
+
+                console.log(
+                    `🎯 SYNC TP SÀN ${instId} → ${st.currentTP}`
+                );
+            }
+
+        } catch (e) {
+
+            console.error(
+                `❌ Sync TP sàn lỗi ${instId}:`,
+                e.message
+            );
+        }
+    }
+
+
+    /* =======================================================
+     * 1.6 TP ĐỘNG
      *
-     * Khi giá tiến tới khoảng 90% quãng đường từ ENTRY
-     * tới TP CỨNG:
-     * - Gỡ TP cứng
-     * - Đặt TP mới phía sau TP cứng
-     * - TP mới phải tốt hơn TP trước
+     * CHỈ KÍCH HOẠT KHI GIÁ ĐÃ ĐI ≥ 80%
+     * QUÃNG ENTRY → TP BAN ĐẦU
      *
-     * Sau đó chỉ nâng TP khi TP hiện tại đã được giá chạm.
-     * KHÔNG chạy TP theo từng tick.
+     * SAU ĐÓ:
+     * - LONG  : TP MỚI > TP CŨ
+     * - SHORT : TP MỚI < TP CŨ
+     * - KHÔNG BÁM THEO GIÁ TỪNG TICK
+     * - CHỈ DỜI TP TIẾP KHI GIÁ ĐÃ CHẠM TP HIỆN TẠI
      * ======================================================= */
 
     const atrNow = Number(st.atr) > 0
@@ -2054,141 +2125,131 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
     let dynamicTP;
 
-    if (
-        Number.isFinite(Number(st.tp)) &&
-        Number(st.tp) > 0 &&
+    const hardTP =
+        Number(st.tp) > 0
+            ? Number(st.tp)
+            : Number(st.currentTP || 0);
+
+    const currentTP =
+        Number(st.currentTP || st.tp || 0);
+
+    const nearHardTP =
+        hardTP > 0 &&
         (
             isLong
-                ? last < Number(st.tp)
-                : last > Number(st.tp)
+                ? last < hardTP
+                : last > hardTP
         ) &&
         (
             (
                 isLong
-                    ? (last - entry) / (Number(st.tp) - entry) * 100
-                    : (entry - last) / (entry - Number(st.tp)) * 100
+                    ? (last - entry) / (hardTP - entry) * 100
+                    : (entry - last) / (entry - hardTP) * 100
             ) >= 80
-        )
-    ) {
+        );
 
-        /* ===== GẦN TP CỨNG → BẮT ĐẦU DYNAMIC TP ===== */
+
+    /* ================= TP ĐẦU TIÊN SAU 80% ================= */
+
+    if (nearHardTP) {
 
         if (isLong) {
 
             dynamicTP =
-                Number(st.tp) + atrNow * 0.5;
+                hardTP + atrNow * 0.5;
 
             if (
                 Number.isFinite(bb) &&
-                bb > Number(st.tp)
+                bb > hardTP
             ) {
                 dynamicTP = Math.min(
                     dynamicTP,
-                    Number(st.tp) +
-                    (bb - Number(st.tp)) * 0.5
+                    hardTP + (bb - hardTP) * 0.5
                 );
             }
 
         } else {
 
             dynamicTP =
-                Number(st.tp) - atrNow * 0.5;
+                hardTP - atrNow * 0.5;
 
             if (
                 Number.isFinite(bb) &&
                 bb > 0 &&
-                bb < Number(st.tp)
+                bb < hardTP
             ) {
                 dynamicTP = Math.max(
                     dynamicTP,
-                    Number(st.tp) -
-                    (Number(st.tp) - bb) * 0.5
-                );
-            }
-        }
-
-    } else {
-
-        /* ===================================================
-         * SAU KHI TP ĐỘNG ĐÃ ĐƯỢC KÍCH HOẠT:
-         *
-         * Chỉ tạo TP mới khi giá đã chạm TP hiện tại.
-         * TP mới luôn tốt hơn TP trước.
-         * =================================================== */
-
-        const currentTP =
-            Number(st.currentTP || st.tp || 0);
-
-        if (
-            currentTP > 0 &&
-            (
-                isLong
-                    ? last >= currentTP
-                    : last <= currentTP
-            )
-        ) {
-
-            if (isLong) {
-
-                dynamicTP =
-                    currentTP + atrNow * 0.5;
-
-                if (
-                    Number.isFinite(bb) &&
-                    bb > currentTP
-                ) {
-                    dynamicTP = Math.min(
-                        dynamicTP,
-                        currentTP +
-                        (bb - currentTP) * 0.5
-                    );
-                }
-
-                /* BẮT BUỘC CAO HƠN TP TRƯỚC */
-                dynamicTP = Math.max(
-                    dynamicTP,
-                    currentTP + atrNow * 0.2
-                );
-
-            } else {
-
-                dynamicTP =
-                    currentTP - atrNow * 0.5;
-
-                if (
-                    Number.isFinite(bb) &&
-                    bb > 0 &&
-                    bb < currentTP
-                ) {
-                    dynamicTP = Math.max(
-                        dynamicTP,
-                        currentTP -
-                        (currentTP - bb) * 0.5
-                    );
-                }
-
-                /* BẮT BUỘC THẤP HƠN TP TRƯỚC */
-                dynamicTP = Math.min(
-                    dynamicTP,
-                    currentTP - atrNow * 0.2
+                    hardTP - (hardTP - bb) * 0.5
                 );
             }
         }
     }
 
 
+    /* ================= TP TIẾP THEO ================= */
+
+    else if (
+        currentTP > 0 &&
+        (
+            isLong
+                ? last >= currentTP
+                : last <= currentTP
+        )
+    ) {
+
+        if (isLong) {
+
+            dynamicTP =
+                currentTP + atrNow * 0.5;
+
+            if (
+                Number.isFinite(bb) &&
+                bb > currentTP
+            ) {
+                dynamicTP = Math.min(
+                    dynamicTP,
+                    currentTP + (bb - currentTP) * 0.5
+                );
+            }
+
+            dynamicTP = Math.max(
+                dynamicTP,
+                currentTP + atrNow * 0.2
+            );
+
+        } else {
+
+            dynamicTP =
+                currentTP - atrNow * 0.5;
+
+            if (
+                Number.isFinite(bb) &&
+                bb > 0 &&
+                bb < currentTP
+            ) {
+                dynamicTP = Math.max(
+                    dynamicTP,
+                    currentTP - (currentTP - bb) * 0.5
+                );
+            }
+
+            dynamicTP = Math.min(
+                dynamicTP,
+                currentTP - atrNow * 0.2
+            );
+        }
+    }
+
+
     /* =======================================================
-     * 1.6 CHỈ NHẬN TP MỚI KHI NẰM PHÍA TRƯỚC GIÁ
-     * VÀ KHÔNG ĐƯỢC THẤP HƠN TP TRƯỚC
+     * 1.7 CHỈ NHẬN TP MỚI NẾU THỰC SỰ TĂNG LỢI NHUẬN
      * ======================================================= */
 
     if (
         Number.isFinite(dynamicTP) &&
         dynamicTP > 0
     ) {
-
-        const currentTP =
-            Number(st.currentTP || st.tp || 0);
 
         if (isLong) {
 
@@ -2212,7 +2273,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
 
     /* =======================================================
-     * 1.7 AMEND TP THẬT TRÊN OKX
+     * 1.8 AMEND TP THẬT TRÊN OKX
      * ======================================================= */
 
     if (
@@ -2289,7 +2350,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
     }
 
 
-    /* ================= 1.8 BLACK SWAN ================= */
+    /* ================= 1.9 BLACK SWAN ================= */
 
     const isBlackSwanExit =
         st.isSpecial &&
@@ -2298,21 +2359,26 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
         meaningfulPullback &&
         momentumWeak &&
         moneyExhaustion &&
-        Number.isFinite(Number(st.tp)) &&
-        Number(st.tp) > 0 &&
+        Number.isFinite(
+            Number(st.currentTP || st.tp)
+        ) &&
+        Number(st.currentTP || st.tp) > 0 &&
         (
             isLong
-                ? (Number(st.tp) - last) / last * 100 >= 1
-                : (last - Number(st.tp)) / last * 100 >= 1
+                ? (
+                    Number(st.currentTP || st.tp) - last
+                ) / last * 100 >= 1
+
+                : (
+                    last - Number(st.currentTP || st.tp)
+                ) / last * 100 >= 1
         );
 
 
     /* =======================================================
-     * 1.9 MARKET CLOSE KHI KIỆT SỨC
+     * 1.10 MARKET CLOSE KHI KIỆT SỨC
      *
-     * PHẦN NÀY VẪN ĐƯỢC GIỮ:
-     * Khi dòng tiền kiệt sức / rơi khỏi đỉnh đủ mạnh
-     * thì chốt lợi nhuận ngay.
+     * PEAK-GAP PHẢI ĐỦ ÍT NHẤT 1 NẾN 15M
      * ======================================================= */
 
     if (
@@ -2320,7 +2386,11 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
         (
             (
                 dropFromPeak >= dropTrigger &&
-                awayFromPeak
+                awayFromPeak &&
+                (
+                    Date.now() -
+                    (st.peakTime || Date.now())
+                ) >= 15 * 60 * 1000
             ) ||
             isBlackSwanExit
         )
@@ -2374,6 +2444,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
             if (typeof fillerCooldown !== 'undefined')
                 fillerCooldown[instId] = Date.now();
+
 
             delete activeOrders[instId];
 
