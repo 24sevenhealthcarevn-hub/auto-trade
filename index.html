@@ -1856,18 +1856,29 @@ if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
         continue;
     }
 }
-if (false) {
-/* ================= SOFT STOP: -20% + PATTERN (LOGIC BẢN 2) ================= */
-if (pnlPct <= -20) {
+if (true) {
+/* ================= ĐẢO CHIỀU: -30% + PATTERN M15 ================= */
+if (pnlPct <= -30) {
     try {
-        const candleRes = await okxApiRequest(`/market/candles?instId=${instId}&bar=15m&limit=2`);
+        const candleRes = await okxApiRequest(`/market/candles?instId=${instId}&bar=15m&limit=3`);
         const candles = candleRes?.data || [];
 
-        if (candles.length >= 2) {
-            const [curr, prev] = candles;
+        // Bỏ nến M15 đang chạy → chỉ dùng nến đã đóng
+        if (candles.length >= 3) {
+            const curr = candles[1];
+            const prev = candles[2];
 
-            const c = { o: +curr[1], h: +curr[2], l: +curr[3], close: +curr[4] };
-            const pPrev = { o: +prev[1], close: +prev[4] };
+            const c = {
+                o: +curr[1],
+                h: +curr[2],
+                l: +curr[3],
+                close: +curr[4]
+            };
+
+            const pPrev = {
+                o: +prev[1],
+                close: +prev[4]
+            };
 
             const body = Math.abs(c.o - c.close);
 
@@ -1875,35 +1886,269 @@ if (pnlPct <= -20) {
                 ? (c.h - Math.max(c.o, c.close) > body * 4)
                 : (Math.min(c.o, c.close) - c.l > body * 4);
 
-            const isSignificantBody = Math.abs(c.close - c.o) / c.o > 0.003;
+            const isSignificantBody =
+                c.o > 0 &&
+                Math.abs(c.close - c.o) / c.o > 0.003;
 
-            const isEngulfing = isSignificantBody && (isLong
-                ? (pPrev.close > pPrev.o && c.o >= pPrev.close && c.close < pPrev.o)
-                : (pPrev.close < pPrev.o && c.o <= pPrev.close && c.close > pPrev.o));
+            const isEngulfing = isSignificantBody && (
+                isLong
+                    ? (
+                        pPrev.close > pPrev.o &&
+                        c.o >= pPrev.close &&
+                        c.close < pPrev.o
+                    )
+                    : (
+                        pPrev.close < pPrev.o &&
+                        c.o <= pPrev.close &&
+                        c.close > pPrev.o
+                    )
+            );
 
-            if (isPinbar || isEngulfing || pnlPct <= -20) {
-                console.log(`⚠️ [SOFT STOP] ${instId} phát hiện đảo chiều.`);
+            /* ================= XÁC NHẬN ĐẢO CHIỀU ================= */
 
-                const closeRes = await okxApiRequest('/trade/order', 'POST', {
-                    instId,
-                    tdMode: 'cross',
-                    side: isLong ? 'sell' : 'buy',
-                    posSide: isLong ? 'long' : 'short',
-                    ordType: 'market',
-                    sz: posQty.toString()
-                });
+            if (isPinbar || isEngulfing) {
+
+                console.log(
+                    `🔄 [ĐẢO CHIỀU] ${instId} - M15 xác nhận đảo chiều.`
+                );
+
+                /* ===================================================
+                 * 1. HỦY TP/SL CŨ TRƯỚC KHI ĐÓNG VỊ THẾ
+                 * =================================================== */
+
+                try {
+
+                    const oldAlgoRes =
+                        await okxApiRequest(
+                            `/trade/orders-algo-pending?ordType=conditional`
+                        );
+
+                    const oldAlgos =
+                        (oldAlgoRes?.data || [])
+                            .filter(a =>
+                                a.instId === instId &&
+                                (
+                                    a.tpTriggerPx ||
+                                    a.slTriggerPx
+                                )
+                            );
+
+                    for (const a of oldAlgos) {
+
+                        await okxApiRequest(
+                            '/trade/cancel-algos',
+                            'POST',
+                            [{
+                                instId: instId,
+                                algoId: a.algoId
+                            }]
+                        );
+                    }
+
+                    /* OCO nếu TP/SL cũ được đặt dạng OCO */
+                    const oldOcoRes =
+                        await okxApiRequest(
+                            `/trade/orders-algo-pending?ordType=oco`
+                        );
+
+                    const oldOcos =
+                        (oldOcoRes?.data || [])
+                            .filter(a =>
+                                a.instId === instId &&
+                                (
+                                    a.tpTriggerPx ||
+                                    a.slTriggerPx
+                                )
+                            );
+
+                    for (const a of oldOcos) {
+
+                        await okxApiRequest(
+                            '/trade/cancel-algos',
+                            'POST',
+                            [{
+                                instId: instId,
+                                algoId: a.algoId
+                            }]
+                        );
+                    }
+
+                } catch (e) {
+
+                    console.error(
+                        `⚠️ Hủy TP/SL cũ lỗi ${instId}:`,
+                        e.message
+                    );
+                }
+
+
+                /* ===================================================
+                 * 2. ĐÓNG VỊ THẾ CŨ
+                 * =================================================== */
+
+                const closeRes =
+                    await okxApiRequest(
+                        '/trade/order',
+                        'POST',
+                        {
+                            instId,
+                            tdMode: 'cross',
+                            side: isLong ? 'sell' : 'buy',
+                            posSide: isLong ? 'long' : 'short',
+                            ordType: 'market',
+                            sz: (
+                                typeof posQty !== 'undefined'
+                                    ? posQty
+                                    : st.sz
+                            ).toString()
+                        }
+                    );
+
 
                 if (closeRes?.code === '0') {
-                    const msg = `⚠️ **SIÊU BOT HONG SOFT STOP: ${instId}**\n📉 PNL: ${pnlPct.toFixed(2)}%\n📊 Pattern đảo chiều M15 → đóng lệnh.`;
-                    if (typeof sendTelegram === 'function') sendTelegram(msg).catch(() => {});
-                    // CHÈN DÒNG NÀY TẠI ĐÂY
-                    localStorage.setItem('last_exit_' + instId, Date.now().toString());
-                    delete activeOrders[instId];
-                    localStorage.setItem('okx_active_orders', JSON.stringify(activeOrders));
-                    continue;
+
+                    /* ===================================================
+                     * 3. MỞ VỊ THẾ NGƯỢC CHIỀU NGAY
+                     * =================================================== */
+
+                    const reverseRes =
+                        await okxApiRequest(
+                            '/trade/order',
+                            'POST',
+                            {
+                                instId,
+                                tdMode: 'cross',
+                                side: isLong ? 'buy' : 'sell',
+                                posSide: isLong ? 'short' : 'long',
+                                ordType: 'market',
+                                sz: (
+                                    typeof posQty !== 'undefined'
+                                        ? posQty
+                                        : st.sz
+                                ).toString()
+                            }
+                        );
+
+
+                    if (reverseRes?.code === '0') {
+
+                        /* ===================================================
+                         * 4. LẤY GIÁ KHỚP THỰC TẾ CỦA LỆNH NGƯỢC
+                         * =================================================== */
+
+                        const reversePosRes =
+                            await okxApiRequest(
+                                `/account/positions?instType=SWAP&instId=${instId}`
+                            );
+
+                        const reversePos =
+                            (reversePosRes?.data || [])
+                                .find(p =>
+                                    p.instId === instId &&
+                                    (
+                                        p.posSide ===
+                                            (isLong ? 'short' : 'long')
+                                    ) &&
+                                    Number(p.pos) > 0
+                                );
+
+                        if (reversePos) {
+
+                            const reverseEntry =
+                                Number(reversePos.avgPx);
+
+                            const reverseQty =
+                                Number(reversePos.pos);
+
+                            /*
+                             * 100% PNL:
+                             *
+                             * PNL% = biến động giá × leverage
+                             *
+                             * LONG 100%:
+                             * Entry × (1 + 1 / leverage)
+                             *
+                             * SHORT 100%:
+                             * Entry × (1 - 1 / leverage)
+                             */
+
+                            const reverseTP =
+                                isLong
+                                    ? reverseEntry *
+                                      (1 + 1 / leverage)
+                                    : reverseEntry *
+                                      (1 - 1 / leverage);
+
+
+                            /* ===================================================
+                             * 5. ĐẶT TP-ONLY MỚI = 100% PNL
+                             * =================================================== */
+
+                            const newTPRes =
+                                await okxApiRequest(
+                                    '/trade/order-algo',
+                                    'POST',
+                                    {
+                                        instId,
+                                        tdMode: 'cross',
+                                        side: isLong ? 'buy' : 'sell',
+                                        posSide: isLong ? 'short' : 'long',
+                                        ordType: 'conditional',
+                                        sz: reverseQty.toString(),
+                                        tpTriggerPx: reverseTP.toString(),
+                                        tpOrdPx: '-1',
+                                        tpTriggerPxType: 'last'
+                                    }
+                                );
+
+
+                            if (newTPRes?.code === '0') {
+
+                                st.currentTP = reverseTP;
+                                st.tp = reverseTP;
+                                st.tpAlgoId =
+                                    newTPRes?.data?.[0]?.algoId ||
+                                    null;
+
+                                st.peakPrice = reverseEntry;
+                                st.tpBuffer = [reverseEntry];
+
+                                console.log(
+                                    `🎯 [REVERSE TP] ${instId} → TP 100% PNL: ${reverseTP}`
+                                );
+
+                                const msg =
+                                    `🔄 **SIÊU BOT HONG ĐẢO CHIỀU: ${instId}**\n` +
+                                    `📉 PNL cũ: ${pnlPct.toFixed(2)}%\n` +
+                                    `📊 M15 Pinbar/Engulfing xác nhận\n` +
+                                    `↔️ Đã đảo ${isLong ? 'LONG → SHORT' : 'SHORT → LONG'}\n` +
+                                    `🎯 TP mới: 100% PNL\n` +
+                                    `🚀 TP Engine tiếp quản trailing.`;
+
+                                if (typeof sendTelegram === 'function')
+                                    sendTelegram(msg).catch(() => {});
+                            }
+                        }
+
+
+                        localStorage.setItem(
+                            'last_exit_' + instId,
+                            Date.now().toString()
+                        );
+
+                        delete activeOrders[instId];
+
+                        localStorage.setItem(
+                            'okx_active_orders',
+                            JSON.stringify(activeOrders)
+                        );
+
+                        continue;
+                    }
                 }
             }
         }
+
     } catch (e) {}
 }
 }
