@@ -2034,7 +2034,18 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
 
     /* =======================================================
-     * 1.5 TP ĐỘNG - BỎ TP CŨ, ĐẶT TP MỚI VỪA TẦM
+     * 1.5 TP ĐỘNG
+     *
+     * 10-30% CHỈ THEO DÕI.
+     *
+     * Khi giá tiến tới khoảng 90% quãng đường từ ENTRY
+     * tới TP CỨNG:
+     * - Gỡ TP cứng
+     * - Đặt TP mới phía sau TP cứng
+     * - TP mới phải tốt hơn TP trước
+     *
+     * Sau đó chỉ nâng TP khi TP hiện tại đã được giá chạm.
+     * KHÔNG chạy TP theo từng tick.
      * ======================================================= */
 
     const atrNow = Number(st.atr) > 0
@@ -2043,73 +2054,160 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
     let dynamicTP;
 
-    if (isLong) {
+    if (
+        Number.isFinite(Number(st.tp)) &&
+        Number(st.tp) > 0 &&
+        (
+            isLong
+                ? last < Number(st.tp)
+                : last > Number(st.tp)
+        ) &&
+        (
+            (
+                isLong
+                    ? (last - entry) / (Number(st.tp) - entry) * 100
+                    : (entry - last) / (entry - Number(st.tp)) * 100
+            ) >= 80
+        )
+    ) {
 
-        dynamicTP = last + atrNow * 0.5;
+        /* ===== GẦN TP CỨNG → BẮT ĐẦU DYNAMIC TP ===== */
 
-        if (
-            Number.isFinite(bb) &&
-            bb > last
-        ) {
-            dynamicTP = Math.min(
-                dynamicTP,
-                last + (bb - last) * 0.7
-            );
-        }
+        if (isLong) {
 
-        /* KHÔNG ĐƯỢC HẠ TP XUỐNG DƯỚI TP BAN ĐẦU */
-        if (
-            Number.isFinite(Number(st.tp)) &&
-            Number(st.tp) > 0
-        ) {
-            dynamicTP = Math.max(
-                dynamicTP,
-                Number(st.tp)
-            );
+            dynamicTP =
+                Number(st.tp) + atrNow * 0.5;
+
+            if (
+                Number.isFinite(bb) &&
+                bb > Number(st.tp)
+            ) {
+                dynamicTP = Math.min(
+                    dynamicTP,
+                    Number(st.tp) +
+                    (bb - Number(st.tp)) * 0.5
+                );
+            }
+
+        } else {
+
+            dynamicTP =
+                Number(st.tp) - atrNow * 0.5;
+
+            if (
+                Number.isFinite(bb) &&
+                bb > 0 &&
+                bb < Number(st.tp)
+            ) {
+                dynamicTP = Math.max(
+                    dynamicTP,
+                    Number(st.tp) -
+                    (Number(st.tp) - bb) * 0.5
+                );
+            }
         }
 
     } else {
 
-        dynamicTP = last - atrNow * 0.5;
+        /* ===================================================
+         * SAU KHI TP ĐỘNG ĐÃ ĐƯỢC KÍCH HOẠT:
+         *
+         * Chỉ tạo TP mới khi giá đã chạm TP hiện tại.
+         * TP mới luôn tốt hơn TP trước.
+         * =================================================== */
+
+        const currentTP =
+            Number(st.currentTP || st.tp || 0);
 
         if (
-            Number.isFinite(bb) &&
-            bb > 0 &&
-            bb < last
+            currentTP > 0 &&
+            (
+                isLong
+                    ? last >= currentTP
+                    : last <= currentTP
+            )
         ) {
-            dynamicTP = Math.max(
-                dynamicTP,
-                last - (last - bb) * 0.7
-            );
-        }
 
-        /* KHÔNG ĐƯỢC HẠ TP XUỐNG DƯỚI TP BAN ĐẦU */
-        if (
-            Number.isFinite(Number(st.tp)) &&
-            Number(st.tp) > 0
-        ) {
-            dynamicTP = Math.min(
-                dynamicTP,
-                Number(st.tp)
-            );
+            if (isLong) {
+
+                dynamicTP =
+                    currentTP + atrNow * 0.5;
+
+                if (
+                    Number.isFinite(bb) &&
+                    bb > currentTP
+                ) {
+                    dynamicTP = Math.min(
+                        dynamicTP,
+                        currentTP +
+                        (bb - currentTP) * 0.5
+                    );
+                }
+
+                /* BẮT BUỘC CAO HƠN TP TRƯỚC */
+                dynamicTP = Math.max(
+                    dynamicTP,
+                    currentTP + atrNow * 0.2
+                );
+
+            } else {
+
+                dynamicTP =
+                    currentTP - atrNow * 0.5;
+
+                if (
+                    Number.isFinite(bb) &&
+                    bb > 0 &&
+                    bb < currentTP
+                ) {
+                    dynamicTP = Math.max(
+                        dynamicTP,
+                        currentTP -
+                        (currentTP - bb) * 0.5
+                    );
+                }
+
+                /* BẮT BUỘC THẤP HƠN TP TRƯỚC */
+                dynamicTP = Math.min(
+                    dynamicTP,
+                    currentTP - atrNow * 0.2
+                );
+            }
         }
     }
 
 
     /* =======================================================
-     * 1.6 CHỈ TRAILING TP KHI TP MỚI CÒN Ở PHÍA TRƯỚC GIÁ
+     * 1.6 CHỈ NHẬN TP MỚI KHI NẰM PHÍA TRƯỚC GIÁ
+     * VÀ KHÔNG ĐƯỢC THẤP HƠN TP TRƯỚC
      * ======================================================= */
 
     if (
         Number.isFinite(dynamicTP) &&
-        dynamicTP > 0 &&
-        (
-            isLong
-                ? dynamicTP > last
-                : dynamicTP < last
-        )
+        dynamicTP > 0
     ) {
-        finalTP = dynamicTP;
+
+        const currentTP =
+            Number(st.currentTP || st.tp || 0);
+
+        if (isLong) {
+
+            if (
+                dynamicTP > last &&
+                dynamicTP > currentTP
+            ) {
+                finalTP = dynamicTP;
+            }
+
+        } else {
+
+            if (
+                dynamicTP < last &&
+                dynamicTP < currentTP
+            ) {
+                finalTP = dynamicTP;
+            }
+        }
     }
 
 
@@ -2131,10 +2229,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
             if (
                 finalTP > last &&
-                (
-                    currentTP <= last ||
-                    finalTP > currentTP
-                )
+                finalTP > currentTP
             ) {
                 needAmendTP = true;
             }
@@ -2143,10 +2238,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
             if (
                 finalTP < last &&
-                (
-                    currentTP >= last ||
-                    finalTP < currentTP
-                )
+                finalTP < currentTP
             ) {
                 needAmendTP = true;
             }
@@ -2218,8 +2310,9 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
     /* =======================================================
      * 1.9 MARKET CLOSE KHI KIỆT SỨC
      *
-     * KHÔNG CẦN ĐỢI TP CŨ.
-     * TP thật đã được amend lên OKX.
+     * PHẦN NÀY VẪN ĐƯỢC GIỮ:
+     * Khi dòng tiền kiệt sức / rơi khỏi đỉnh đủ mạnh
+     * thì chốt lợi nhuận ngay.
      * ======================================================= */
 
     if (
@@ -2281,7 +2374,6 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
             if (typeof fillerCooldown !== 'undefined')
                 fillerCooldown[instId] = Date.now();
-
 
             delete activeOrders[instId];
 
