@@ -2318,6 +2318,7 @@ if (st.tpBuffer.length > 120)
     st.tpBuffer.splice(1, 1);
 
 let finalTP = st.tp || st.currentTP;
+let forceSLtoOldTP = false;
 const tpThreshold = 10;
 
 if (pnlPct >= tpThreshold || st.peakPrice) {
