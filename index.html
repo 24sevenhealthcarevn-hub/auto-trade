@@ -2305,7 +2305,7 @@ if (true) {
     }
 }
               
-/* ================= 1. TP & BUFFER (DYNAMIC TP + EXHAUSTION EXIT) ================= */
+/* ================= 1. TP & BUFFER (PURE SINGLE-STEP DYNAMIC TP) ================= */
 
 if (!st.tpBuffer) st.tpBuffer = [last];
 
@@ -2318,17 +2318,9 @@ if (st.tpBuffer.length > 120)
     st.tpBuffer.splice(1, 1);
 
 let finalTP = st.tp || st.currentTP;
-let forceSLtoOldTP = false;
 const tpThreshold = 10;
 
-
-/* =======================================================
- * 1.1 KÍCH HOẠT SHADOW TP
- * ======================================================= */
-
 if (pnlPct >= tpThreshold || st.peakPrice) {
-
-    forceSLtoOldTP = true;
 
     if (!st.peakPrice)
         st.peakPrice = last;
@@ -2336,321 +2328,80 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
     if (isLong ? last > st.peakPrice : last < st.peakPrice)
         st.peakPrice = last;
 
-    const peakPrice = st.peakPrice;
-
-    const dropFromPeak =
-        (isLong
-            ? peakPrice - last
-            : last - peakPrice
-        ) / peakPrice * 100 * leverage;
-
-    const peakPnlPct =
-        (isLong
-            ? peakPrice - entry
-            : entry - peakPrice
-        ) / entry * 100 * leverage;
-
-
-/* =======================================================
- * 1.2 GAP PEAK
- *
- * BB KHÔNG CÒN QUYỀN SIẾT DROP TRIGGER
- * ======================================================= */
-
-    const dropTrigger =
-        peakPnlPct >= 200 ? 3 :
-        peakPnlPct >= 150 ? 3.5 :
-        peakPnlPct >= 120 ? 4 :
-        peakPnlPct >= 100 ? 5 :
-        peakPnlPct >= 80  ? 6 :
-        peakPnlPct >= 60  ? 7 :
-        peakPnlPct >= 40  ? 9 :
-        peakPnlPct >= 30  ? 11 :
-        15;
-
-
-/* =======================================================
- * 1.3 BOLLINGER
- *
- * BB CHỈ XÁC ĐỊNH VÙNG TP MỚI.
- * KHÔNG SIẾT DROP TRIGGER.
- * ======================================================= */
-
-    const bb = isLong
-        ? Number(st.upperBB)
-        : Number(st.lowerBB);
-
-
-/* =======================================================
- * 1.4 MOMENTUM THỰC
- *
- * Không dùng 1 tick p1/p2 nữa.
- * So sánh các điểm đầu/cuối trong buffer.
- * ======================================================= */
-
-    const p1 =
-        st.tpBuffer[st.tpBuffer.length - 1] || last;
-
-    const p2 =
-        st.tpBuffer[st.tpBuffer.length - 4] || p1;
-
-    const p3 =
-        st.tpBuffer[st.tpBuffer.length - 8] || p2;
-
-    const momentumWeak = isLong
-        ? (p1 < p2 && p2 <= p3)
-        : (p1 > p2 && p2 >= p3);
-
-
-/* =======================================================
- * 1.5 PULLBACK
- * ======================================================= */
-
-    const awayFromPeak = isLong
-        ? last < peakPrice
-        : last > peakPrice;
-
-    const meaningfulPullback =
-        (
-            isLong
-                ? (peakPrice - last) / peakPrice * 100 >= 3
-                : (last - peakPrice) / peakPrice * 100 >= 3
-        ) &&
-        awayFromPeak;
-
-
-/* =======================================================
- * 1.6 MONEY EXHAUSTION
- * ======================================================= */
-
-    const moneyExhaustion =
-        momentumWeak &&
-        (
-            (
-                Number.isFinite(Number(st.volSpread)) &&
-                Number(st.volSpread) <= 0.80
-            ) ||
-            (
-                Number.isFinite(Number(st.rsi)) &&
-                (
-                    isLong
-                        ? Number(st.rsi) >= 70
-                        : Number(st.rsi) <= 30
-                )
-            )
-        );
-
-
-/* =======================================================
- * 1.7 ATR
- * ======================================================= */
-
     const atrNow =
         Number(st.atr) > 0
             ? Number(st.atr)
             : Math.abs(last - entry);
 
-
-/* =======================================================
- * 1.8 DYNAMIC TP
- *
- * Giai đoạn 1:
- * 80% đường Entry → TP cứng
- *
- * Giai đoạn 2:
- * TP mới = phía sau TP cứng
- *
- * Giai đoạn 3:
- * TP hiện tại bị hit → mới nâng tiếp
- * ======================================================= */
-
     let dynamicTP = null;
 
-    const hardTP = Number(st.tp);
-    const currentTP =
-        Number(st.currentTP || st.tp || 0);
+    const activeTP = Number(st.currentTP || st.tp || 0);
 
-
-/* ---------- GIAI ĐOẠN 1: TIẾN 80% TP CỨNG ---------- */
+    /* =======================================================
+     * KHI GIÁ TIẾN ĐỦ 80% TỚI TP ĐANG HOẠT ĐỘNG → NÂNG MỘT BƯỚC VỪA SỨC
+     * ======================================================= */
 
     if (
-        Number.isFinite(hardTP) &&
-        hardTP > 0 &&
+        Number.isFinite(activeTP) &&
+        activeTP > 0 &&
         (
             isLong
-                ? last < hardTP
-                : last > hardTP
+                ? last < activeTP
+                : last > activeTP
         )
     ) {
-
         const progress =
             isLong
-                ? (last - entry) / (hardTP - entry) * 100
-                : (entry - last) / (entry - hardTP) * 100;
-
+                ? (last - entry) / (activeTP - entry) * 100
+                : (entry - last) / (entry - activeTP) * 100;
 
         if (progress >= 80) {
-
             if (isLong) {
-
-                dynamicTP =
-                    hardTP + atrNow * 0.5;
-
-                /* BB chỉ giới hạn TP mới */
-                if (
-                    Number.isFinite(bb) &&
-                    bb > hardTP
-                ) {
-                    dynamicTP =
-                        Math.min(
-                            dynamicTP,
-                            hardTP + (bb - hardTP) * 0.5
-                        );
-                }
-
+                dynamicTP = activeTP + atrNow * 0.5;
             } else {
-
-                dynamicTP =
-                    hardTP - atrNow * 0.5;
-
-                /* BB chỉ giới hạn TP mới */
-                if (
-                    Number.isFinite(bb) &&
-                    bb < hardTP
-                ) {
-                    dynamicTP =
-                        Math.max(
-                            dynamicTP,
-                            hardTP - (hardTP - bb) * 0.5
-                        );
-                }
+                dynamicTP = activeTP - atrNow * 0.5;
             }
-        }
-
-
-/* ---------- GIAI ĐOẠN 2: TP HIỆN TẠI ĐÃ HIT ---------- */
-
-    } else if (
-        currentTP > 0 &&
-        (
-            isLong
-                ? last >= currentTP
-                : last <= currentTP
-        )
-    ) {
-
-        if (isLong) {
-
-            dynamicTP =
-                currentTP + atrNow * 0.5;
-
-            if (
-                Number.isFinite(bb) &&
-                bb > currentTP
-            ) {
-                dynamicTP =
-                    Math.min(
-                        dynamicTP,
-                        currentTP + (bb - currentTP) * 0.5
-                    );
-            }
-
-            /* Không bao giờ thấp hơn TP cũ */
-            dynamicTP =
-                Math.max(
-                    dynamicTP,
-                    currentTP + atrNow * 0.2
-                );
-
-        } else {
-
-            dynamicTP =
-                currentTP - atrNow * 0.5;
-
-            if (
-                Number.isFinite(bb) &&
-                bb < currentTP
-            ) {
-                dynamicTP =
-                    Math.max(
-                        dynamicTP,
-                        currentTP - (currentTP - bb) * 0.5
-                    );
-            }
-
-            /* Không bao giờ cao hơn TP cũ */
-            dynamicTP =
-                Math.min(
-                    dynamicTP,
-                    currentTP - atrNow * 0.2
-                );
         }
     }
 
-
-/* =======================================================
- * 1.9 CHỈ NHẬN TP MỚI KHI:
- *
- * - nằm phía trước giá
- * - tốt hơn TP hiện tại
- * ======================================================= */
+    /* =======================================================
+     * CHỈ NHẬN TP MỚI KHI NẰM PHÍA TRƯỚC GIÁ VÀ CAO/THẤP HƠN TP CŨ
+     * ======================================================= */
 
     if (
         Number.isFinite(dynamicTP) &&
         dynamicTP > 0
     ) {
-
         if (isLong) {
-
-            if (
-                dynamicTP > last &&
-                dynamicTP > currentTP
-            ) {
+            if (dynamicTP > last && dynamicTP > activeTP) {
                 finalTP = dynamicTP;
             }
-
         } else {
-
-            if (
-                dynamicTP < last &&
-                dynamicTP < currentTP
-            ) {
+            if (dynamicTP < last && dynamicTP < activeTP) {
                 finalTP = dynamicTP;
             }
         }
     }
 
-
-/* =======================================================
- * 1.10 AMEND TP THẬT TRÊN OKX
- * ======================================================= */
+    /* =======================================================
+     * AMEND TP THẬT TRÊN OKX
+     * ======================================================= */
 
     if (
         finalTP &&
         st.tpAlgoId
     ) {
-
         let needAmendTP = false;
 
         if (isLong) {
-
-            if (
-                finalTP > last &&
-                finalTP > currentTP
-            ) {
+            if (finalTP > last && finalTP > activeTP) {
                 needAmendTP = true;
             }
-
         } else {
-
-            if (
-                finalTP < last &&
-                finalTP < currentTP
-            ) {
+            if (finalTP < last && finalTP < activeTP) {
                 needAmendTP = true;
             }
         }
-
 
         if (
             needAmendTP &&
@@ -2659,9 +2410,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
                 Date.now() - st.lastTPAmend > 5000
             )
         ) {
-
             try {
-
                 const amendTP =
                     await okxApiRequest(
                         '/trade/amend-algos',
@@ -2676,7 +2425,6 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
                     );
 
                 if (amendTP?.code === '0') {
-
                     st.currentTP = finalTP;
                     st.lastTPAmend = Date.now();
 
@@ -2684,9 +2432,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
                         `🎯 TRAILING TP ${instId} → ${finalTP}`
                     );
                 }
-
             } catch (e) {
-
                 console.error(
                     `❌ Amend TP lỗi ${instId}:`,
                     e.message
@@ -2695,107 +2441,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
         }
     }
 
-
-/* =======================================================
- * 1.11 BLACK SWAN
- *
- * BB KHÔNG TỰ CHỐT.
- * Phải có:
- * Peak + Pullback + Momentum yếu + Money Exhaustion
- * ======================================================= */
-
-    const isBlackSwanExit =
-        st.isSpecial &&
-        pnlPct >= 30 &&
-        awayFromPeak &&
-        meaningfulPullback &&
-        momentumWeak &&
-        moneyExhaustion;
-
-
-/* =======================================================
- * 1.12 MARKET CLOSE
- *
- * Chỉ đóng khi:
- * - Peak rơi đủ sâu
- * HOẶC
- * - Black Swan exhaustion
- *
- * BB một mình KHÔNG BAO GIỜ đóng lệnh.
- * ======================================================= */
-
-    if (
-        pnlPct > 0 &&
-        (
-            (
-                dropFromPeak >= dropTrigger &&
-                awayFromPeak &&
-                momentumWeak &&
-                moneyExhaustion
-            ) ||
-            isBlackSwanExit
-        )
-    ) {
-
-        console.log(
-            isBlackSwanExit
-                ? `🎯 [BLACK SWAN EXHAUSTION] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}%`
-                : `🎯 [EXHAUSTION] ${instId} chốt tại PNL: ${pnlPct.toFixed(2)}% ` +
-                  `(Rơi ${dropFromPeak.toFixed(2)}% từ đỉnh ${peakPnlPct.toFixed(2)}%, gap ${dropTrigger}%)`
-        );
-
-
-        const closeRes =
-            await okxApiRequest(
-                '/trade/order',
-                'POST',
-                {
-                    instId,
-                    tdMode: 'cross',
-                    side: isLong ? 'sell' : 'buy',
-                    posSide: isLong ? 'long' : 'short',
-                    ordType: 'market',
-                    sz: (
-                        typeof posQty !== 'undefined'
-                            ? posQty
-                            : st.sz
-                    ).toString()
-                }
-            );
-
-
-        if (closeRes?.code === '0') {
-
-            const msg =
-                `💰 **SIÊU BOT EXHAUSTION TP: ${instId}**\n` +
-                `📈 PNL: ${pnlPct.toFixed(2)}%\n` +
-                `🏆 Peak: ${peakPnlPct.toFixed(2)}%\n` +
-                `📉 Rơi từ đỉnh: ${dropFromPeak.toFixed(2)}%\n` +
-                `🛡️ Gap: ${dropTrigger}%\n` +
-                `💧 Momentum + Money Exhaustion → chốt lợi nhuận.`;
-
-
-            if (typeof sendTelegram === 'function')
-                sendTelegram(msg).catch(() => {});
-
-
-            if (typeof fillerCooldown !== 'undefined')
-                fillerCooldown[instId] = Date.now();
-
-
-            delete activeOrders[instId];
-
-            localStorage.setItem(
-                'okx_active_orders',
-                JSON.stringify(activeOrders)
-            );
-
-            continue;
-        }
-    }
-
 } else {
-
     finalTP = st.tp || st.currentTP;
 }
 
