@@ -2410,7 +2410,7 @@ const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10;
 
 // 1. ƯU TIÊN CAO NHẤT: Khi TP động (Shadow TP) đã kích hoạt, khóa SL ngay theo cấu trúc đã định
 if (forceSLtoOldTP && st.tp) {
-    proposedSL = +st.tp; 
+    proposedSL = +(st.currentTP || st.tp); 
 } 
 // 2. REVERSAL / LÃI CỰC LỚN (>= 50%): Siết cực chặt bằng ATR nhỏ hoặc bám đỉnh
 else if ((st.tradeCase?.includes("Rev") && pnlPct >= 30) || pnlPct >= 50) {
