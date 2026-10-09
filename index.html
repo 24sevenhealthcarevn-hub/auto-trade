@@ -2448,29 +2448,133 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 
 
                /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
-let proposedSL = null; 
-const holdTimeMins = (Date.now() - st.ts) / 60000;
-const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10; 
 
-// 1. ƯU TIÊN CAO NHẤT: Khi TP động (Shadow TP) đã kích hoạt, khóa SL ngay theo cấu trúc đã định
-if (forceSLtoOldTP && st.tp) {
-    proposedSL = +(st.currentTP || st.tp); 
-} 
-// 2. REVERSAL / LÃI CỰC LỚN (>= 50%): Siết cực chặt bằng ATR nhỏ hoặc bám đỉnh
-else if ((st.tradeCase?.includes("Rev") && pnlPct >= 30) || pnlPct >= 50) {
-    proposedSL = isLong ? last - (st.atr * 1.0) : last + (st.atr * 1.0); // Siết chặt 1.0 ATR
+let proposedSL = null;
+const holdTimeMins = (Date.now() - st.ts) / 60000;
+const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10;
+const atrNow = Number(st.atr) > 0 ? Number(st.atr) : Math.abs(last - entry);
+
+// 1. CẬP NHẬT ĐỈNH GIÁ
+if (!st.peakPrice) st.peakPrice = last;
+if (isLong ? last > st.peakPrice : last < st.peakPrice)
+    st.peakPrice = last;
+
+const peakPrice = st.peakPrice;
+const dropFromPeak =
+    (isLong ? peakPrice - last : last - peakPrice) / peakPrice * 100 * leverage;
+
+const peakPnlPct =
+    (isLong ? peakPrice - entry : entry - peakPrice) / entry * 100 * leverage;
+
+// 2. GAP THEO PNL ĐỈNH
+let dropTrigger =
+    peakPnlPct >= 200 ? 3 :
+    peakPnlPct >= 150 ? 3.5 :
+    peakPnlPct >= 120 ? 4 :
+    peakPnlPct >= 100 ? 5 :
+    peakPnlPct >= 80 ? 6 :
+    peakPnlPct >= 60 ? 7 :
+    peakPnlPct >= 40 ? 9 :
+    peakPnlPct >= 30 ? 11 :
+    15;
+
+// 3. GAP THEO BOLLINGER BANDS
+const bb = isLong ? Number(st.upperBB) : Number(st.lowerBB);
+
+if (
+    Number.isFinite(bb) &&
+    bb > 0 &&
+    (isLong ? peakPrice > bb : peakPrice < bb)
+) {
+    const bbDist = Math.abs(peakPrice - bb) / bb * 100;
+
+    const bbDrop =
+        bbDist >= 3 ? 2.5 :
+        bbDist >= 2 ? 3.5 :
+        bbDist >= 1 ? 5 :
+        bbDist >= 0.5 ? 7 :
+        15;
+
+    dropTrigger = Math.min(dropTrigger, bbDrop);
 }
-// 3. LÃI TRUNG BÌNH CAO (25% - 50%) && Đã xác nhận thời gian
-else if (pnlPct >= 25 && isConfirmed) { 
-    proposedSL = isLong ? last - (st.atr * 1.5) : last + (st.atr * 1.5);
+
+// 4. NHẬN DIỆN ĐỘNG LƯỢNG SUY YẾU
+const p1 = st.tpBuffer?.[st.tpBuffer.length - 1] || last;
+const p2 = st.tpBuffer?.[st.tpBuffer.length - 2] || last;
+
+const awayFromPeak = isLong
+    ? last < peakPrice
+    : last > peakPrice;
+
+const meaningfulPullback =
+    (
+        isLong
+            ? (peakPrice - last) / peakPrice * 100 >= 3
+            : (last - peakPrice) / peakPrice * 100 >= 3
+    ) && awayFromPeak;
+
+const momentumWeak = isLong ? p1 < p2 : p1 > p2;
+
+const moneyExhaustion =
+    momentumWeak && (
+        (
+            Number.isFinite(Number(st.volSpread)) &&
+            Number(st.volSpread) <= 0.80
+        ) ||
+        (
+            Number.isFinite(Number(st.rsi)) &&
+            (isLong ? Number(st.rsi) >= 70 : Number(st.rsi) <= 30)
+        )
+    );
+
+const isBlackSwanExit =
+    st.isSpecial &&
+    pnlPct >= 30 &&
+    awayFromPeak &&
+    meaningfulPullback &&
+    momentumWeak &&
+    moneyExhaustion;
+
+// 5. TRAILING SL THEO ATR
+if (forceSLtoOldTP && Number(st.tp) > 0) {
+    proposedSL = Number(st.tp);
+} else if (pnlPct >= 10 && isConfirmed) {
+    let atrMultiplier =
+        pnlPct >= 50 ? 1.0 :
+        pnlPct >= 25 ? 1.5 :
+        pnlPct >= 15 ? 1.75 :
+        2.0;
+
+    // Siết gap khi rút từ đỉnh vượt ngưỡng
+    if (dropFromPeak >= dropTrigger && awayFromPeak)
+        atrMultiplier = Math.min(atrMultiplier, 0.75);
+
+    // Siết thêm khi có tín hiệu kiệt sức
+    if (isBlackSwanExit)
+        atrMultiplier = Math.min(atrMultiplier, 0.5);
+
+    proposedSL = isLong
+        ? last - atrNow * atrMultiplier
+        : last + atrNow * atrMultiplier;
+
+    // Bảo toàn lợi nhuận khi đã đạt PNL >= 15%
+    if (pnlPct >= 15) {
+        const lockSL = entry * (1 + (isLong ? 0.003 : -0.003));
+        proposedSL = isLong
+            ? Math.max(proposedSL, lockSL)
+            : Math.min(proposedSL, lockSL);
+    }
 }
-// 4. LÃI KHỞI ĐẦU AN TOÀN (15% - 25%): Bảo toàn vốn, dời SL qua Entry + phí
-else if (pnlPct >= 15 && isConfirmed) {
-    proposedSL = entry * (1 + (isLong ? 0.003 : -0.003)); 
-}
-// 5. GIA ĐOẠN ĐẦU (10% - 15%): Kê SL rộng hơn một chút để chống quét râu nến
-else if (pnlPct >= 10 && isConfirmed) {
-    proposedSL = isLong ? last - (st.atr * 2.0) : last + (st.atr * 2.0); // Dùng 2.0 ATR cho thoáng
+
+// 6. CHỈ SIẾT SL THEO HƯỚNG CÓ LỢI
+if (Number.isFinite(proposedSL) && proposedSL > 0) {
+    const currentSL = Number(st.currentSL) || 0;
+
+    if (isLong && currentSL > 0)
+        proposedSL = Math.max(proposedSL, currentSL);
+
+    if (!isLong && currentSL > 0)
+        proposedSL = Math.min(proposedSL, currentSL);
 }
 
 /* ================= 3. ĐẢM BẢO SL CHỈ TIẾN KHÔNG LÙI (FIXED) ================= */
