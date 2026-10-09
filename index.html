@@ -2386,29 +2386,15 @@ if (true) {
 }
               
 
-/* ================= TP ENGINE: UNIFIED AUTO-SYNC + TRAILING TP ================= */
 
-// Giữ nguyên BUFFER của TP Engine hiện tại
-if (!st.tpBuffer) st.tpBuffer = [last];
+/* ================= TP ENGINE: AUTO SYNC + TRAILING TP FIX ================= */
 
-if (isLong ? last > st.tpBuffer[0] : last < st.tpBuffer[0])
-    st.tpBuffer[0] = last;
-
-st.tpBuffer.push(last);
-
-if (st.tpBuffer.length > 120)
-    st.tpBuffer.splice(1, 1);
-
-let finalTP = st.tp || st.currentTP;
-
-// State độc lập cho toàn bộ vị thế, kể cả lệnh mở tay
 if (!globalThis.__tpEngineState)
     globalThis.__tpEngineState = {};
 
 if (!globalThis.__tpEngineLastScan)
     globalThis.__tpEngineLastScan = 0;
 
-// Chỉ quét toàn tài khoản mỗi 5 giây để tránh quét trùng ở mỗi vòng BOT
 if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
     globalThis.__tpEngineLastScan = Date.now();
 
@@ -2425,11 +2411,14 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
             )
         ]);
 
-        if (
-            positionsRes?.code === '0' &&
-            conditionalRes?.code === '0' &&
-            ocoRes?.code === '0'
+        if (positionsRes?.code !== '0') {
+            console.error('❌ TP SYNC positions:', positionsRes?.msg, positionsRes);
+        } else if (
+            conditionalRes?.code !== '0' ||
+            ocoRes?.code !== '0'
         ) {
+            console.error('❌ TP SYNC algo pending:', conditionalRes, ocoRes);
+        } else {
             const tpAlgoList = [
                 ...(conditionalRes.data || []),
                 ...(ocoRes.data || [])
@@ -2439,36 +2428,27 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
                 const qty = Number(p.pos);
                 const entryPrice = Number(p.avgPx);
 
-                if (
-                    !p.instId ||
-                    !Number.isFinite(qty) ||
-                    qty === 0 ||
-                    !(entryPrice > 0)
-                ) continue;
+                if (!p.instId || !Number.isFinite(qty) || qty === 0)
+                    continue;
+
+                if (!(entryPrice > 0)) {
+                    console.warn(`⚠️ TP ${p.instId}: avgPx không hợp lệ`, p);
+                    continue;
+                }
 
                 const posSide = p.posSide || 'net';
-
                 const positionIsLong =
                     posSide === 'long' ||
                     (posSide === 'net' && qty > 0);
-
                 const positionIsShort =
                     posSide === 'short' ||
                     (posSide === 'net' && qty < 0);
 
                 if (!positionIsLong && !positionIsShort) continue;
 
-                // Tìm TP Algo đang treo theo mã và chiều vị thế
                 const matchingAlgos = tpAlgoList.filter(a => {
                     if (a.instId !== p.instId) return false;
-
-                    const tpPrice = Number(a.tpTriggerPx);
-                    if (!(tpPrice > 0)) return false;
-
-                    if (
-                        a.side !==
-                        (positionIsLong ? 'sell' : 'buy')
-                    ) return false;
+                    if (a.side !== (positionIsLong ? 'sell' : 'buy')) return false;
 
                     if (
                         a.posSide &&
@@ -2476,91 +2456,57 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
                         a.posSide !== posSide
                     ) return false;
 
-                    return true;
+                    return Number(a.tpTriggerPx) > 0 && !!a.algoId;
                 });
 
-                // Không đoán khi có nhiều TP cùng mã/chiều
                 if (matchingAlgos.length !== 1) {
-                    if (matchingAlgos.length > 1) {
-                        console.warn(
-                            `⚠️ TP SYNC: Có nhiều TP Algo cho ${p.instId} ${posSide}; bỏ qua để tránh sửa nhầm`
-                        );
-                    }
+                    console.warn(
+                        `⚠️ TP ${p.instId} ${posSide}: ` +
+                        (matchingAlgos.length === 0
+                            ? 'Không tìm thấy TP Algo phù hợp'
+                            : `Tìm thấy ${matchingAlgos.length} TP Algo; bỏ qua để tránh sửa nhầm`)
+                    );
                     continue;
                 }
 
                 const tpAlgo = matchingAlgos[0];
                 const activeTP = Number(tpAlgo.tpTriggerPx);
+                const pnlPct = Number(p.uplRatio) * 100;
 
-                if (!tpAlgo.algoId || !(activeTP > 0)) continue;
+                if (!Number.isFinite(pnlPct)) {
+                    console.warn(`⚠️ TP ${p.instId}: uplRatio không hợp lệ`, p.uplRatio);
+                    continue;
+                }
 
-                // Giá thị trường mới nhất
+                if (pnlPct < 10) {
+                    console.log(
+                        `⏸️ TP ${p.instId}: ROI ${pnlPct.toFixed(2)}% < 10%`
+                    );
+                    continue;
+                }
+
                 const tickerRes = await okxApiRequest(
                     `/market/ticker?instId=${encodeURIComponent(p.instId)}`,
                     'GET'
                 );
-
                 const marketPrice = Number(tickerRes?.data?.[0]?.last);
 
-                if (!(marketPrice > 0)) continue;
-
-                // PnL ratio từ dữ liệu vị thế OKX
-                const pnlPct = Number(p.uplRatio) * 100;
-
-                if (!Number.isFinite(pnlPct)) continue;
-
-                // State riêng theo mã + chiều vị thế
-                const stateKey = `${p.instId}_${posSide}`;
-
-                if (!globalThis.__tpEngineState[stateKey]) {
-                    globalThis.__tpEngineState[stateKey] = {
-                        peakPrice: marketPrice,
-                        activated: false,
-                        lastAmend: 0
-                    };
-                }
-
-                const tpState = globalThis.__tpEngineState[stateKey];
-
-                if (
-                    positionIsLong
-                        ? marketPrice > tpState.peakPrice
-                        : marketPrice < tpState.peakPrice
-                ) {
-                    tpState.peakPrice = marketPrice;
-                }
-
-                if (pnlPct >= 10)
-                    tpState.activated = true;
-
-                if (!tpState.activated) continue;
-
-                // Chỉ nâng TP khi giá chưa chạm TP và đã đi được 80%
-                if (
-                    positionIsLong
-                        ? marketPrice >= activeTP
-                        : marketPrice <= activeTP
-                ) continue;
-
-                const progress = positionIsLong
-                    ? (marketPrice - entryPrice) /
-                      (activeTP - entryPrice) * 100
-                    : (entryPrice - marketPrice) /
-                      (entryPrice - activeTP) * 100;
-
-                if (!Number.isFinite(progress) || progress < 80)
+                if (!(marketPrice > 0)) {
+                    console.warn(`⚠️ TP ${p.instId}: không lấy được giá thị trường`, tickerRes);
                     continue;
+                }
 
-                // Tính ATR 1H từ nến OKX
                 const candleRes = await okxApiRequest(
                     `/market/candles?instId=${encodeURIComponent(p.instId)}&bar=1H&limit=15`,
                     'GET'
                 );
 
-                if (candleRes?.code !== '0') continue;
+                if (candleRes?.code !== '0') {
+                    console.warn(`⚠️ TP ${p.instId}: lỗi lấy nến ATR`, candleRes);
+                    continue;
+                }
 
                 const candles = (candleRes.data || []).slice().reverse();
-
                 let trSum = 0;
                 let trCount = 0;
                 let previousClose = null;
@@ -2570,11 +2516,7 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
                     const low = Number(c[3]);
                     const close = Number(c[4]);
 
-                    if (
-                        !Number.isFinite(high) ||
-                        !Number.isFinite(low) ||
-                        !Number.isFinite(close)
-                    ) continue;
+                    if (![high, low, close].every(Number.isFinite)) continue;
 
                     const tr = previousClose === null
                         ? high - low
@@ -2594,37 +2536,77 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
 
                 const atrNow = trCount > 0
                     ? trSum / trCount
-                    : Math.abs(marketPrice - entryPrice);
+                    : Math.abs(marketPrice - entryPrice) * 0.015;
 
-                if (!(atrNow > 0)) continue;
+                if (!(atrNow > 0)) {
+                    console.warn(`⚠️ TP ${p.instId}: ATR không hợp lệ`);
+                    continue;
+                }
 
-                // Giữ nguyên bước nâng TP 0.3 ATR
+                const stateKey = `${p.instId}_${posSide}_${tpAlgo.algoId}`;
+
+                if (!globalThis.__tpEngineState[stateKey]) {
+                    globalThis.__tpEngineState[stateKey] = {
+                        peakPrice: marketPrice,
+                        lastAmend: 0,
+                        lastAmendPeak: marketPrice
+                    };
+                }
+
+                const tpState = globalThis.__tpEngineState[stateKey];
+
+                if (
+                    positionIsLong
+                        ? marketPrice > tpState.peakPrice
+                        : marketPrice < tpState.peakPrice
+                ) {
+                    tpState.peakPrice = marketPrice;
+                }
+
+                // Chỉ nâng TP khi giá tiếp tục đi thuận chiều ít nhất 0,3 ATR
+                const peakAdvance = positionIsLong
+                    ? tpState.peakPrice - tpState.lastAmendPeak
+                    : tpState.lastAmendPeak - tpState.peakPrice;
+
+                if (peakAdvance < atrNow * 0.3) {
+                    console.log(
+                        `⏳ TP ${p.instId} ${posSide}: ROI ${pnlPct.toFixed(2)}%, ` +
+                        `chờ giá đi thuận thêm 0,3 ATR | TP=${activeTP}, ` +
+                        `Giá=${marketPrice}, Peak=${tpState.peakPrice}`
+                    );
+                    continue;
+                }
+
                 const dynamicTP = positionIsLong
                     ? activeTP + atrNow * 0.3
                     : activeTP - atrNow * 0.3;
 
-                // Chỉ nâng TP theo hướng có lợi
                 const needAmend = positionIsLong
                     ? dynamicTP > activeTP && dynamicTP > marketPrice
                     : dynamicTP < activeTP && dynamicTP < marketPrice;
 
-                if (!needAmend) continue;
-
-                if (Date.now() - tpState.lastAmend < 5000)
+                if (!needAmend) {
+                    console.log(
+                        `⏸️ TP ${p.instId}: TP mới không hợp lệ | ` +
+                        `Current=${activeTP}, New=${dynamicTP}, Price=${marketPrice}`
+                    );
                     continue;
+                }
 
-                const amendRes = await okxApiRequest(
-                    '/trade/amend-algos',
-                    'POST',
-                    {
-                        instId: p.instId,
-                        algoId: tpAlgo.algoId,
-                        newTpTriggerPx: dynamicTP.toString(),
-                        newTpOrdPx: '-1',
-                        newTpTriggerPxType:
-                            tpAlgo.tpTriggerPxType || 'last'
-                    }
+                if (Date.now() - tpState.lastAmend < 5000) continue;
+
+                console.log(
+                    `🔄 ĐANG AMEND TP ${p.instId} ${posSide}: ` +
+                    `${activeTP} → ${dynamicTP}`
                 );
+
+                const amendRes = await okxApiRequest('/trade/amend-algos', 'POST', {
+                    instId: p.instId,
+                    algoId: tpAlgo.algoId,
+                    newTpTriggerPx: dynamicTP.toString(),
+                    newTpOrdPx: '-1',
+                    newTpTriggerPxType: tpAlgo.tpTriggerPxType || 'last'
+                });
 
                 const amendItem = amendRes?.data?.[0];
 
@@ -2633,9 +2615,15 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
                     amendItem?.sCode === '0'
                 ) {
                     tpState.lastAmend = Date.now();
+                    tpState.lastAmendPeak = tpState.peakPrice;
 
-                    // Đồng bộ lại biến của BOT nếu là vị thế đang xử lý
+                    console.log(
+                        `✅ TRAILING TP THÀNH CÔNG ${p.instId} ${posSide}: ` +
+                        `${activeTP} → ${dynamicTP} | ROI ${pnlPct.toFixed(2)}%`
+                    );
+
                     if (
+                        typeof instId !== 'undefined' &&
                         p.instId === instId &&
                         positionIsLong === isLong
                     ) {
@@ -2643,36 +2631,23 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
                         st.currentTP = dynamicTP;
                         finalTP = dynamicTP;
                     }
-
-                    console.log(
-                        `🎯 TRAILING TP ${p.instId} ${posSide}: ` +
-                        `${activeTP} → ${dynamicTP} | PnL ${pnlPct.toFixed(2)}%`
-                    );
                 } else {
                     console.error(
-                        `❌ AMEND TP ${p.instId}:`,
-                        amendRes?.msg || amendItem?.sMsg || amendRes
+                        `❌ AMEND TP THẤT BẠI ${p.instId}:`,
+                        amendRes?.msg || '',
+                        amendItem?.sCode,
+                        amendItem?.sMsg,
+                        amendRes
                     );
                 }
             }
-        } else {
-            console.error(
-                '❌ TP SYNC: Không lấy được vị thế hoặc TP Algo',
-                positionsRes?.msg,
-                conditionalRes?.msg,
-                ocoRes?.msg
-            );
         }
     } catch (e) {
-        console.error('❌ TP ENGINE SYNC:', e.message);
+        console.error('❌ TP ENGINE SYNC EXCEPTION:', e.message);
     }
 }
 
-// Giữ finalTP tương thích với phần code phía sau
-if (!finalTP)
-    finalTP = st.tp || st.currentTP;
-
-/* ================= END UNIFIED TP ENGINE ================= */
+/* ================= END TP ENGINE ================= */
 
 
                /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
