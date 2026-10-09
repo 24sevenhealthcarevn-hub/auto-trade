@@ -1892,19 +1892,20 @@ if (true) {
 
             const candleRes =
                 await okxApiRequest(
-                    `/market/candles?instId=${instId}&bar=15m&limit=3`
+                    `/market/candles?instId=${instId}&bar=15m&limit=22`
                 );
 
             const candles = candleRes?.data || [];
 
-            if (candles.length >= 3) {
+            if (candles.length >= 22) {
 
                 /* =====================================================
-                 * DÙNG 2 NẾN M15 ĐÃ ĐÓNG
-                 * Không dùng nến đang chạy
+                 * DÙNG NẾN M15 ĐÃ ĐÓNG
+                 * OKX trả nến mới nhất trước
+                 * candles[0] là nến hiện tại, chưa xác nhận
                  * ===================================================== */
 
-                const [curr, prev] = candles;
+                const [curr, prev] = [candles[1], candles[2]];
 
                 const c = {
                     o: +curr[1],
@@ -1915,15 +1916,41 @@ if (true) {
 
                 const pPrev = {
                     o: +prev[1],
+                    h: +prev[2],
+                    l: +prev[3],
                     close: +prev[4]
                 };
 
 
-                const body =
-                    Math.abs(c.o - c.close);
+                /* ================= BOLLINGER BANDS M15 ================= */
+
+                const bbCloses =
+                    candles.slice(1, 21).map(x => +x[4]);
+
+                const bbMiddle =
+                    bbCloses.reduce((a, b) => a + b, 0) /
+                    bbCloses.length;
+
+                const bbVariance =
+                    bbCloses.reduce(
+                        (a, b) => a + Math.pow(b - bbMiddle, 2),
+                        0
+                    ) / bbCloses.length;
+
+                const bbStd =
+                    Math.sqrt(bbVariance);
+
+                const bbUpper =
+                    bbMiddle + 2 * bbStd;
+
+                const bbLower =
+                    bbMiddle - 2 * bbStd;
 
 
                 /* ================= PINBAR ================= */
+
+                const body =
+                    Math.abs(c.o - c.close);
 
                 const isPinbar =
                     isLong
@@ -1941,9 +1968,8 @@ if (true) {
                 /* ================= ENGULFING ================= */
 
                 const isSignificantBody =
-                    Math.abs(c.close - c.o) /
-                    c.o > 0.003;
-
+                    c.o > 0 &&
+                    Math.abs(c.close - c.o) / c.o > 0.003;
 
                 const isEngulfing =
                     isSignificantBody &&
@@ -1964,10 +1990,69 @@ if (true) {
                     );
 
 
-                if (isPinbar || isEngulfing) {
+                /* ================= XÁC NHẬN PHÁ BOLL M15 ================= */
+
+                // LONG cũ: chỉ xét đảo SHORT khi nến đóng dưới BB dưới
+                // SHORT cũ: chỉ xét đảo LONG khi nến đóng trên BB trên
+
+                const m15Break =
+                    isLong
+                        ? (
+                            c.close < bbLower &&
+                            c.close < c.o &&
+                            c.close < pPrev.l
+                        )
+                        : (
+                            c.close > bbUpper &&
+                            c.close > c.o &&
+                            c.close > pPrev.h
+                        );
+
+
+                /* ================= XÁC NHẬN XU HƯỚNG H1 ================= */
+
+                const h1Res =
+                    await okxApiRequest(
+                        `/market/candles?instId=${instId}&bar=1H&limit=3`
+                    );
+
+                const h1Candles =
+                    h1Res?.data || [];
+
+                let h1Confirm = false;
+
+                if (h1Candles.length >= 3) {
+
+                    const h1 = h1Candles[1];
+                    const h1Prev = h1Candles[2];
+
+                    const h1Open = +h1[1];
+                    const h1High = +h1[2];
+                    const h1Low = +h1[3];
+                    const h1Close = +h1[4];
+
+                    const h1PrevHigh = +h1Prev[2];
+                    const h1PrevLow = +h1Prev[3];
+
+                    h1Confirm =
+                        isLong
+                            ? (
+                                h1Close < h1Open &&
+                                h1Close < h1PrevLow
+                            )
+                            : (
+                                h1Close > h1Open &&
+                                h1Close > h1PrevHigh
+                            );
+                }
+
+
+                /* ================= XÁC NHẬN TÍN HIỆU ================= */
+
+                if (m15Break && h1Confirm) {
 
                     console.log(
-                        `🔄 [ĐẢO CHIỀU] ${instId} phát hiện tín hiệu M15.`
+                        `🔄 [ĐẢO CHIỀU] ${instId} xác nhận phá BB M15 + phá cấu trúc H1.`
                     );
 
 
@@ -1982,7 +2067,6 @@ if (true) {
 
                     const conditionalOrders =
                         algoConditional?.data || [];
-
 
                     for (const algo of conditionalOrders) {
 
@@ -2020,7 +2104,6 @@ if (true) {
 
                     const ocoOrders =
                         algoOCO?.data || [];
-
 
                     for (const algo of ocoOrders) {
 
@@ -2179,12 +2262,6 @@ if (true) {
 
                             /* =========================================
                              * 5. TP MỚI = 100% PNL
-                             *
-                             * LONG:
-                             * Entry + 1 / leverage
-                             *
-                             * SHORT:
-                             * Entry - 1 / leverage
                              * ========================================= */
 
                             const reverseTP =
@@ -2272,7 +2349,7 @@ if (true) {
                                 const msg =
                                     `🔄 **SIÊU BOT ĐẢO CHIỀU: ${instId}**\n` +
                                     `📉 PNL lệnh cũ: ${pnlPct.toFixed(2)}%\n` +
-                                    `📊 Pattern M15 xác nhận đảo chiều\n` +
+                                    `📊 M15 phá Bollinger Bands + H1 xác nhận phá cấu trúc\n` +
                                     `🔁 Đã đóng lệnh cũ + mở vị thế ngược chiều\n` +
                                     `🎯 TP mới: ${reverseTP}\n` +
                                     `💰 Mục tiêu PNL: 100%`;
