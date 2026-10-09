@@ -1614,35 +1614,30 @@ for (const p of selectedPool) {
     // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
 
    /* ===============================
-* 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
-* =============================== */
+ * 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
+ * =============================== */
 
-// 🟢 FIX ĐIỂM NGHẼN: Cập nhật lại openIds thực tế từ OKX trước khi lặp (Tránh bị kẹt ID lệnh cũ)
-// Giả định biến openPositions chứa danh sách vị thế thực tế từ Bước 1
+// Cập nhật lại openIds thực tế trước khi lặp
 if (typeof openPositions !== 'undefined') {
     openIds = new Set(openPositions.map(p => p.instId));
 }
 
-for (const p of pool) {
-    // 1. Kiểm tra giới hạn số lượng vị thế đang mở thực tế
+for (const p of selectedPool) {
+    // 1. Kiểm tra giới hạn số lượng vị thế đang mở
     if (openIds.size >= MAX_POSITIONS) {
         log(`⚠️ Đã đạt giới hạn tối đa ${MAX_POSITIONS} vị thế đang chạy.`);
         break;
     }
     
     if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
-    
-    // 2. Bỏ qua nếu mã này ĐANG MỞ VỊ THẾ THỰC TẾ trên OKX
     if (openIds.has(p.instId)) continue;
 
     const now = Date.now();
 
     try {
-        // FIX LỖI 1: Chuẩn hóa side về chữ thường ('buy' hoặc 'sell')
         const sideLower = String(p.side).toLowerCase();
         if (sideLower !== 'buy' && sideLower !== 'sell') continue;
 
-        // Xác định posSide chính xác 100% không lo lỗi hoa/thường
         const posSide = sideLower === 'buy' ? 'long' : 'short';
 
         const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${p.instId}`);
@@ -1660,15 +1655,23 @@ for (const p of pool) {
         let uiLeverage = parseInt(document.getElementById('leverage')?.value || 50);
         if (isNaN(uiLeverage) || uiLeverage < 1) uiLeverage = 50;
 
+        // TÍNH SỐ LƯỢNG (QTY) THEO ĐÒN BẨY GỐC UI (Đảm bảo giá trị vị thế mong muốn)
+        const rawTargetQty = (fixedMarginPerOrder * uiLeverage) / (p.last * ctVal);
+        let targetQty = Math.floor(rawTargetQty / lotSz) * lotSz;
+
+        // Nếu khối lượng < minSz, tự động đưa về minSz để không bỏ lỡ lệnh
+        if (targetQty < minSz) {
+            targetQty = minSz;
+        }
+
         const allLeverages = [100, 75, 50, 30, 20, 10, 5, 3, 2, 1];
         const levStepList = [uiLeverage, ...allLeverages]
             .filter((v, i, a) => a.indexOf(v) === i && v <= Math.max(uiLeverage, 100))
             .sort((a, b) => b - a);
 
         let selectedLeverage = null;
-        let selectedQty = 0;
 
-        // 1. DÒ LEVERAGE: Ưu tiên cao -> Hạ dần
+        // DÒ ĐÒN BẨY CAO NHẤT SÀN CHO PHÉP
         for (const lev of levStepList) {
             const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
                 instId: p.instId,
@@ -1678,19 +1681,8 @@ for (const p of pool) {
             });
 
             if (levRes?.code === '0' || levRes?.code === '32115') {
-                const rawQty = (fixedMarginPerOrder * lev) / (p.last * ctVal);
-                const calculatedQty = Math.floor(rawQty / lotSz) * lotSz;
-
-                if (calculatedQty >= minSz) {
-                    selectedLeverage = lev;
-                    selectedQty = calculatedQty;
-                    break;
-                }
-
-                if (!selectedLeverage) {
-                    selectedLeverage = lev;
-                    selectedQty = calculatedQty;
-                }
+                selectedLeverage = lev;
+                break;
             }
         }
 
@@ -1699,38 +1691,43 @@ for (const p of pool) {
             continue;
         }
 
-        // 2. NẾU CHƯA ĐẠT MIN_SZ → BỎ QUA
-        if (selectedQty < minSz) {
-            log(`⚠️ BỎ QUA ${p.instId}: Vốn $${fixedMarginPerOrder} với Lev ${selectedLeverage}x không đủ đạt minSz (${minSz} hợp đồng).`);
-            continue;
-        }
-
-        // 3. TÍNH KÝ QUỸ THỰC TẾ
-        const actualMargin = (selectedQty * p.last * ctVal) / selectedLeverage;
-
-        const finalQty = qPrec > 0 ? selectedQty.toFixed(qPrec) : String(Math.round(selectedQty));
+        // TÍNH KÝ QUỸ THỰC TẾ DỰA TRÊN ĐÒN BẨY ĐÃ SETUP CỦA SÀN
+        const actualMargin = (targetQty * p.last * ctVal) / selectedLeverage;
+        const finalQty = qPrec > 0 ? targetQty.toFixed(qPrec) : String(Math.round(targetQty));
         if (!finalQty || parseFloat(finalQty) <= 0) continue;
 
-        log(`Coin: ${p.instId} | Side: ${sideLower.toUpperCase()} (${posSide.toUpperCase()}) | Leverage: ${selectedLeverage}x | Qty: ${finalQty} | Target Margin: $${fixedMarginPerOrder} | Actual Margin: $${actualMargin.toFixed(4)}`);
+        log(`Coin: ${p.instId} | Side: ${sideLower.toUpperCase()} (${posSide.toUpperCase()}) | Leverage: ${selectedLeverage}x | Qty: ${finalQty} | Actual Margin: $${actualMargin.toFixed(4)}`);
 
         const tpStr = (Math.round(p.tp / tickSz) * tickSz).toFixed(pPrec);
         const slStr = (Math.round(p.sl / tickSz) * tickSz).toFixed(pPrec);
 
-        // 4. BẮT ĐẦU ĐẶT LỆNH MARKET
+        // BƯỚC 1: ĐẶT LỆNH MARKET TRƯỚC
         const res = await okxApiRequest('/trade/order', 'POST', {
             instId: p.instId,
             tdMode: 'cross',
             side: sideLower,
             posSide: posSide,
             ordType: 'market',
-            sz: finalQty,
-            attachAlgoOrds: [
-                { algoOrdType: 'take_profit', tpTriggerPx: tpStr, tpOrdPx: '-1' },
-                { algoOrdType: 'stop_loss', slTriggerPx: slStr, slOrdPx: '-1' }
-            ]
+            sz: finalQty
         });
 
+        // BƯỚC 2: NẾU THÀNH CÔNG THÌ TÁCH GỬI LỆNH ALGO ĐẶT TP/SL (OCO)
         if (res?.code === '0') {
+            const closeSide = sideLower === 'buy' ? 'sell' : 'buy';
+            
+            await okxApiRequest('/trade/order-algo', 'POST', {
+                instId: p.instId,
+                tdMode: 'cross',
+                side: closeSide,
+                posSide: posSide,
+                ordType: 'oco',
+                sz: finalQty,
+                tpTriggerPx: tpStr, 
+                tpOrdPx: '-1',
+                slTriggerPx: slStr, 
+                slOrdPx: '-1'
+            });
+
             if (typeof activeOrders !== 'undefined') {
                 activeOrders[p.instId] = {
                     instId: p.instId,
@@ -1746,7 +1743,7 @@ for (const p of pool) {
                 };
             }
 
-            log(`✅ HOÀN TẤT ${p.instId} | Side: ${posSide.toUpperCase()} | Case: ${p.tradeCase} | Entry: ${p.last} | Lev: ${selectedLeverage}x | TP/SL: OK`);
+            log(`✅ HOÀN TẤT ${p.instId} | Side: ${posSide.toUpperCase()} | Case: ${p.tradeCase || 'Normal'} | Entry: ${p.last} | Lev: ${selectedLeverage}x | TP/SL: OK`);
 
             const msg = `🚀 SUPPER BOT TÂN VÀO LỆNH THÀNH CÔNG\n` +
                         `💎 Coin: ${p.instId.replace('-USDT-SWAP','')}\n` +
@@ -1759,7 +1756,7 @@ for (const p of pool) {
 
             if (typeof sendTelegram === 'function') sendTelegram(msg);
 
-            // Cập nhật lại danh sách vị thế đang mở ngay lập tức
+            // Cập nhật lại danh sách vị thế ngay lập tức
             openIds.add(p.instId);
 
             if (typeof saveOrders === 'function') saveOrders();
