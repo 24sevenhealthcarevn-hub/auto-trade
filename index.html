@@ -1780,9 +1780,8 @@ for (const p of pool) {
 
 /* ================== MONITORING & UI (FIXED) ================== */
 async function monitorOrders() {
-    let forceSLtoOldTP = false;
-    let finalTP = st.tp || st.currentTP;
-    let st = activeOrders[instId] || {};
+    
+
     // Giữ nguyên toàn bộ code hiện tại bên dưới
     activeOrders = JSON.parse(localStorage.getItem('okx_active_orders')) || {};
 
@@ -1851,7 +1850,7 @@ for (const id in activeOrders) {
 
                 const posQty = Math.abs(+p.pos);
 
-                let st = activeOrders[instId];
+                let st = activeOrders[instId] || {};
 
                 if (!st) continue;
 
@@ -2389,7 +2388,8 @@ if (true) {
 
 
 /* ================= TP ENGINE: AUTO SYNC + TRAILING TP FIX ================= */
-
+let forceSLtoOldTP = false;
+    let finalTP = st.tp || st.currentTP;
 if (!globalThis.__tpEngineState)
     globalThis.__tpEngineState = {};
 
