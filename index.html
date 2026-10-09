@@ -1781,7 +1781,7 @@ for (const p of pool) {
 /* ================== MONITORING & UI (FIXED) ================== */
 async function monitorOrders() {
     let forceSLtoOldTP = false;
-
+    let finalTP = st.tp || st.currentTP;
     // Giữ nguyên toàn bộ code hiện tại bên dưới
     activeOrders = JSON.parse(localStorage.getItem('okx_active_orders')) || {};
 
