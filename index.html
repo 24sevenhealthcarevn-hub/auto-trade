@@ -2305,8 +2305,10 @@ if (true) {
     }
 }
               
-/* ================= 1. TP & BUFFER (PURE SINGLE-STEP DYNAMIC TP) ================= */
 
+/* ================= TP ENGINE: UNIFIED AUTO-SYNC + TRAILING TP ================= */
+
+// Giữ nguyên BUFFER của TP Engine hiện tại
 if (!st.tpBuffer) st.tpBuffer = [last];
 
 if (isLong ? last > st.tpBuffer[0] : last < st.tpBuffer[0])
@@ -2318,133 +2320,279 @@ if (st.tpBuffer.length > 120)
     st.tpBuffer.splice(1, 1);
 
 let finalTP = st.tp || st.currentTP;
-let forceSLtoOldTP = false;
-const tpThreshold = 10;
 
-if (pnlPct >= tpThreshold || st.peakPrice) {
+// State độc lập cho toàn bộ vị thế, kể cả lệnh mở tay
+if (!globalThis.__tpEngineState)
+    globalThis.__tpEngineState = {};
 
-    if (!st.peakPrice)
-        st.peakPrice = last;
+if (!globalThis.__tpEngineLastScan)
+    globalThis.__tpEngineLastScan = 0;
 
-    if (isLong ? last > st.peakPrice : last < st.peakPrice)
-        st.peakPrice = last;
+// Chỉ quét toàn tài khoản mỗi 5 giây để tránh quét trùng ở mỗi vòng BOT
+if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
+    globalThis.__tpEngineLastScan = Date.now();
 
-    const atrNow =
-        Number(st.atr) > 0
-            ? Number(st.atr)
-            : Math.abs(last - entry);
-
-    let dynamicTP = null;
-
-    const activeTP = Number(st.currentTP || st.tp || 0);
-
-    /* =======================================================
-     * KHI GIÁ TIẾN ĐỦ 80% TỚI TP ĐANG HOẠT ĐỘNG → NÂNG MỘT BƯỚC VỪA SỨC
-     * ======================================================= */
-
-    if (
-        Number.isFinite(activeTP) &&
-        activeTP > 0 &&
-        (
-            isLong
-                ? last < activeTP
-                : last > activeTP
-        )
-    ) {
-        const progress =
-            isLong
-                ? (last - entry) / (activeTP - entry) * 100
-                : (entry - last) / (entry - activeTP) * 100;
-
-        if (progress >= 80) {
-            if (isLong) {
-                dynamicTP = activeTP + atrNow * 0.3;
-            } else {
-                dynamicTP = activeTP - atrNow * 0.3;
-            }
-        }
-    }
-
-    /* =======================================================
-     * CHỈ NHẬN TP MỚI KHI NẰM PHÍA TRƯỚC GIÁ VÀ CAO/THẤP HƠN TP CŨ
-     * ======================================================= */
-
-    if (
-        Number.isFinite(dynamicTP) &&
-        dynamicTP > 0
-    ) {
-        if (isLong) {
-            if (dynamicTP > last && dynamicTP > activeTP) {
-                finalTP = dynamicTP;
-            }
-        } else {
-            if (dynamicTP < last && dynamicTP < activeTP) {
-                finalTP = dynamicTP;
-            }
-        }
-    }
-
-    /* =======================================================
-     * AMEND TP THẬT TRÊN OKX
-     * ======================================================= */
-
-    if (
-        finalTP &&
-        st.tpAlgoId
-    ) {
-        let needAmendTP = false;
-
-        if (isLong) {
-            if (finalTP > last && finalTP > activeTP) {
-                needAmendTP = true;
-            }
-        } else {
-            if (finalTP < last && finalTP < activeTP) {
-                needAmendTP = true;
-            }
-        }
+    try {
+        const [positionsRes, conditionalRes, ocoRes] = await Promise.all([
+            okxApiRequest('/account/positions?instType=SWAP', 'GET'),
+            okxApiRequest(
+                '/trade/orders-algo-pending?ordType=conditional&instType=SWAP&limit=100',
+                'GET'
+            ),
+            okxApiRequest(
+                '/trade/orders-algo-pending?ordType=oco&instType=SWAP&limit=100',
+                'GET'
+            )
+        ]);
 
         if (
-            needAmendTP &&
-            (
-                !st.lastTPAmend ||
-                Date.now() - st.lastTPAmend > 5000
-            )
+            positionsRes?.code === '0' &&
+            conditionalRes?.code === '0' &&
+            ocoRes?.code === '0'
         ) {
-            try {
-                const amendTP =
-                    await okxApiRequest(
-                        '/trade/amend-algos',
-                        'POST',
-                        {
-                            instId: instId,
-                            algoId: st.tpAlgoId,
-                            newTpTriggerPx: finalTP.toString(),
-                            newTpOrdPx: "-1",
-                            newTpTriggerPxType: "last"
-                        }
-                    );
+            const tpAlgoList = [
+                ...(conditionalRes.data || []),
+                ...(ocoRes.data || [])
+            ];
 
-                if (amendTP?.code === '0') {
-                    st.currentTP = finalTP;
-                    st.lastTPAmend = Date.now();
+            for (const p of positionsRes.data || []) {
+                const qty = Number(p.pos);
+                const entryPrice = Number(p.avgPx);
+
+                if (
+                    !p.instId ||
+                    !Number.isFinite(qty) ||
+                    qty === 0 ||
+                    !(entryPrice > 0)
+                ) continue;
+
+                const posSide = p.posSide || 'net';
+
+                const positionIsLong =
+                    posSide === 'long' ||
+                    (posSide === 'net' && qty > 0);
+
+                const positionIsShort =
+                    posSide === 'short' ||
+                    (posSide === 'net' && qty < 0);
+
+                if (!positionIsLong && !positionIsShort) continue;
+
+                // Tìm TP Algo đang treo theo mã và chiều vị thế
+                const matchingAlgos = tpAlgoList.filter(a => {
+                    if (a.instId !== p.instId) return false;
+
+                    const tpPrice = Number(a.tpTriggerPx);
+                    if (!(tpPrice > 0)) return false;
+
+                    if (
+                        a.side !==
+                        (positionIsLong ? 'sell' : 'buy')
+                    ) return false;
+
+                    if (
+                        a.posSide &&
+                        a.posSide !== 'net' &&
+                        a.posSide !== posSide
+                    ) return false;
+
+                    return true;
+                });
+
+                // Không đoán khi có nhiều TP cùng mã/chiều
+                if (matchingAlgos.length !== 1) {
+                    if (matchingAlgos.length > 1) {
+                        console.warn(
+                            `⚠️ TP SYNC: Có nhiều TP Algo cho ${p.instId} ${posSide}; bỏ qua để tránh sửa nhầm`
+                        );
+                    }
+                    continue;
+                }
+
+                const tpAlgo = matchingAlgos[0];
+                const activeTP = Number(tpAlgo.tpTriggerPx);
+
+                if (!tpAlgo.algoId || !(activeTP > 0)) continue;
+
+                // Giá thị trường mới nhất
+                const tickerRes = await okxApiRequest(
+                    `/market/ticker?instId=${encodeURIComponent(p.instId)}`,
+                    'GET'
+                );
+
+                const marketPrice = Number(tickerRes?.data?.[0]?.last);
+
+                if (!(marketPrice > 0)) continue;
+
+                // PnL ratio từ dữ liệu vị thế OKX
+                const pnlPct = Number(p.uplRatio) * 100;
+
+                if (!Number.isFinite(pnlPct)) continue;
+
+                // State riêng theo mã + chiều vị thế
+                const stateKey = `${p.instId}_${posSide}`;
+
+                if (!globalThis.__tpEngineState[stateKey]) {
+                    globalThis.__tpEngineState[stateKey] = {
+                        peakPrice: marketPrice,
+                        activated: false,
+                        lastAmend: 0
+                    };
+                }
+
+                const tpState = globalThis.__tpEngineState[stateKey];
+
+                if (
+                    positionIsLong
+                        ? marketPrice > tpState.peakPrice
+                        : marketPrice < tpState.peakPrice
+                ) {
+                    tpState.peakPrice = marketPrice;
+                }
+
+                if (pnlPct >= 10)
+                    tpState.activated = true;
+
+                if (!tpState.activated) continue;
+
+                // Chỉ nâng TP khi giá chưa chạm TP và đã đi được 80%
+                if (
+                    positionIsLong
+                        ? marketPrice >= activeTP
+                        : marketPrice <= activeTP
+                ) continue;
+
+                const progress = positionIsLong
+                    ? (marketPrice - entryPrice) /
+                      (activeTP - entryPrice) * 100
+                    : (entryPrice - marketPrice) /
+                      (entryPrice - activeTP) * 100;
+
+                if (!Number.isFinite(progress) || progress < 80)
+                    continue;
+
+                // Tính ATR 1H từ nến OKX
+                const candleRes = await okxApiRequest(
+                    `/market/candles?instId=${encodeURIComponent(p.instId)}&bar=1H&limit=15`,
+                    'GET'
+                );
+
+                if (candleRes?.code !== '0') continue;
+
+                const candles = (candleRes.data || []).slice().reverse();
+
+                let trSum = 0;
+                let trCount = 0;
+                let previousClose = null;
+
+                for (const c of candles) {
+                    const high = Number(c[2]);
+                    const low = Number(c[3]);
+                    const close = Number(c[4]);
+
+                    if (
+                        !Number.isFinite(high) ||
+                        !Number.isFinite(low) ||
+                        !Number.isFinite(close)
+                    ) continue;
+
+                    const tr = previousClose === null
+                        ? high - low
+                        : Math.max(
+                            high - low,
+                            Math.abs(high - previousClose),
+                            Math.abs(low - previousClose)
+                        );
+
+                    if (trCount < 14) {
+                        trSum += tr;
+                        trCount++;
+                    }
+
+                    previousClose = close;
+                }
+
+                const atrNow = trCount > 0
+                    ? trSum / trCount
+                    : Math.abs(marketPrice - entryPrice);
+
+                if (!(atrNow > 0)) continue;
+
+                // Giữ nguyên bước nâng TP 0.3 ATR
+                const dynamicTP = positionIsLong
+                    ? activeTP + atrNow * 0.3
+                    : activeTP - atrNow * 0.3;
+
+                // Chỉ nâng TP theo hướng có lợi
+                const needAmend = positionIsLong
+                    ? dynamicTP > activeTP && dynamicTP > marketPrice
+                    : dynamicTP < activeTP && dynamicTP < marketPrice;
+
+                if (!needAmend) continue;
+
+                if (Date.now() - tpState.lastAmend < 5000)
+                    continue;
+
+                const amendRes = await okxApiRequest(
+                    '/trade/amend-algos',
+                    'POST',
+                    {
+                        instId: p.instId,
+                        algoId: tpAlgo.algoId,
+                        newTpTriggerPx: dynamicTP.toString(),
+                        newTpOrdPx: '-1',
+                        newTpTriggerPxType:
+                            tpAlgo.tpTriggerPxType || 'last'
+                    }
+                );
+
+                const amendItem = amendRes?.data?.[0];
+
+                if (
+                    amendRes?.code === '0' &&
+                    amendItem?.sCode === '0'
+                ) {
+                    tpState.lastAmend = Date.now();
+
+                    // Đồng bộ lại biến của BOT nếu là vị thế đang xử lý
+                    if (
+                        p.instId === instId &&
+                        positionIsLong === isLong
+                    ) {
+                        st.tpAlgoId = tpAlgo.algoId;
+                        st.currentTP = dynamicTP;
+                        finalTP = dynamicTP;
+                    }
 
                     console.log(
-                        `🎯 TRAILING TP ${instId} → ${finalTP}`
+                        `🎯 TRAILING TP ${p.instId} ${posSide}: ` +
+                        `${activeTP} → ${dynamicTP} | PnL ${pnlPct.toFixed(2)}%`
+                    );
+                } else {
+                    console.error(
+                        `❌ AMEND TP ${p.instId}:`,
+                        amendRes?.msg || amendItem?.sMsg || amendRes
                     );
                 }
-            } catch (e) {
-                console.error(
-                    `❌ Amend TP lỗi ${instId}:`,
-                    e.message
-                );
             }
+        } else {
+            console.error(
+                '❌ TP SYNC: Không lấy được vị thế hoặc TP Algo',
+                positionsRes?.msg,
+                conditionalRes?.msg,
+                ocoRes?.msg
+            );
         }
+    } catch (e) {
+        console.error('❌ TP ENGINE SYNC:', e.message);
     }
-
-} else {
-    finalTP = st.tp || st.currentTP;
 }
+
+// Giữ finalTP tương thích với phần code phía sau
+if (!finalTP)
+    finalTP = st.tp || st.currentTP;
+
+/* ================= END UNIFIED TP ENGINE ================= */
 
 
                /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
