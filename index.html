@@ -2217,10 +2217,8 @@ if (true) {
                                     ordType: 'market',
 
                                     sz: (
-                                        typeof posQty !== 'undefined'
-                                            ? posQty
-                                            : st.sz
-                                    ).toString()
+                                        (typeof posQty !== 'undefined' ? posQty : st.sz) * 2
+                                        ).toString()
                                 }
                             );
 
