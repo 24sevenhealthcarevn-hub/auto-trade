@@ -1436,20 +1436,29 @@ for (const t of top120Tickers) {
 async function masterFlow(qualityCandidates) {
   if (!isTrading) return;
 
-  try {
-    /* ===============================
-     * 1. KIỂM TRA VỊ THẾ ĐANG MỞ
-     * =============================== */
-    const posRes = await okxApiRequest('/account/positions?instType=SWAP');
-    if (!posRes || posRes.code !== '0') return;
+/* ===============================
+ * 1. KIỂM TRA VỊ THẾ ĐANG MỞ
+ * =============================== */
+const posRes = await okxApiRequest('/account/positions?instType=SWAP');
+if (!posRes || posRes.code !== '0') return;
 
-    // Lấy danh sách ID các lệnh đang giữ vị thế
-    const openPositions = (posRes.data || []).filter(p => Math.abs(+p.pos) > 0);
-    let openIds = new Set(
-        openPositions
-            .filter(p => !positionsData[p.instId]?.isReversal)
-            .map(p => p.instId)
+// Chỉ quản lý vị thế có SL và không phải vị thế đảo chiều
+const openPositions = (posRes.data || []).filter(p => {
+    const instId = p.instId;
+    const st = activeOrders[instId];
+    const hasSL =
+        Number(st?.currentSL || st?.sl) > 0 ||
+        Boolean(st?.slAlgoId);
+
+    return (
+        Math.abs(+p.pos) > 0 &&
+        !positionsData[instId]?.isReversal &&
+        hasSL
     );
+});
+
+let openIds = new Set(openPositions.map(p => p.instId));
+
 
     if (false) {
     /* ===============================
@@ -1499,57 +1508,98 @@ async function masterFlow(qualityCandidates) {
     if (openIds.size >= MAX_POSITIONS) return;
 
     /* =======================================================
-     * 1.3. GẮN LẠI TP/SL (PROTECT) - CHẠY 24/24
-     * ======================================================= */
-    try {
-      const algoRes = await okxApiRequest('/trade/orders-algo-pending?instType=SWAP&ordType=oco&limit=100');
-      const pendingAlgos = Array.isArray(algoRes?.data) ? algoRes.data : [];
-      const algoByInst = {};
-      for (const a of pendingAlgos) {
+ * 1.3. GẮN LẠI TP/SL (PROTECT) - CHẠY 24/24
+ * ======================================================= */
+try {
+    const algoRes = await okxApiRequest('/trade/orders-algo-pending?instType=SWAP&ordType=oco&limit=100');
+    const pendingAlgos = Array.isArray(algoRes?.data) ? algoRes.data : [];
+    const algoByInst = {};
+
+    for (const a of pendingAlgos) {
         if (!algoByInst[a.instId]) algoByInst[a.instId] = [];
         algoByInst[a.instId].push(a);
-      }
+    }
 
-      for (const p of openPositions) {
+    for (const p of openPositions) {
         const instId = p.instId;
-        const st = (typeof activeOrders !== 'undefined') ? activeOrders[instId] : null;
+        const st = (typeof activeOrders !== 'undefined')
+            ? activeOrders[instId]
+            : null;
+
         if (!st || st.protected) continue;
         if (Date.now() - (st.lastTrail || 0) < 10000) continue;
 
         const algos = algoByInst[instId] || [];
-        if (algos.some(a => a.tpTriggerPx || a.slTriggerPx)) {
-          st.protected = true;
-          continue;
+
+        const hasSL = algos.some(a => Number(a.slTriggerPx) > 0);
+        const hasTP = algos.some(a => Number(a.tpTriggerPx) > 0);
+
+        // Có TP nhưng không có SL: bỏ qua và đánh dấu đã bảo vệ
+        if (hasTP && !hasSL) {
+            st.protected = true;
+            continue;
         }
 
-        const infoRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+        // Đã có cả TP và SL: bỏ qua và đánh dấu đã bảo vệ
+        if (hasTP && hasSL) {
+            st.protected = true;
+            continue;
+        }
+
+        // Các trường hợp còn lại: tiếp tục xử lý gắn lại TP/SL
+        const infoRes = await okxPublic(
+            `/public/instruments?instType=SWAP&instId=${instId}`
+        );
         const info = infoRes?.data?.[0];
+
         if (info) {
             const tickSz = parseFloat(info.tickSz || 0.00000001);
-            const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
-            
-            const tpStr = (Math.round(st.tp / tickSz) * tickSz).toFixed(pPrec);
-            const slStr = (Math.round(st.sl / tickSz) * tickSz).toFixed(pPrec);
+            const pPrec = info.tickSz.includes('.')
+                ? info.tickSz.split('.')[1].length
+                : 0;
 
-            const posSide = p.posSide === 'long' || p.posSide === 'short' ? p.posSide : (+p.pos > 0 ? 'long' : 'short');
+            const tpStr = (
+                Math.round(st.tp / tickSz) * tickSz
+            ).toFixed(pPrec);
+
+            const slStr = (
+                Math.round(st.sl / tickSz) * tickSz
+            ).toFixed(pPrec);
+
+            const posSide =
+                p.posSide === 'long' || p.posSide === 'short'
+                    ? p.posSide
+                    : (+p.pos > 0 ? 'long' : 'short');
+
             const side = posSide === 'long' ? 'sell' : 'buy';
 
             const res = await okxApiRequest('/trade/order-algo', 'POST', {
-              instId, tdMode: 'cross', side, posSide, ordType: 'oco',
-              sz: Math.abs(+p.pos).toString(),
-              tpTriggerPx: tpStr, tpOrdPx: '-1',
-              slTriggerPx: slStr, slOrdPx: '-1'
+                instId,
+                tdMode: 'cross',
+                side,
+                posSide,
+                ordType: 'oco',
+                sz: Math.abs(+p.pos).toString(),
+                tpTriggerPx: tpStr,
+                tpOrdPx: '-1',
+                slTriggerPx: slStr,
+                slOrdPx: '-1'
             });
 
-            if (res?.code === '0') {
-              st.protected = true;
-              console.log(`🛡️ Gắn lại TP/SL cho ${instId} thành công.`);
+            if (res?.code === '0' && res?.data?.[0]?.sCode === '0') {
+                st.protected = true;
+                console.log(`🛡️ Gắn lại TP/SL cho ${instId} thành công.`);
+            } else {
+                console.error(
+                    `❌ Không thể gắn lại TP/SL cho ${instId}:`,
+                    res
+                );
             }
         }
-      }
-    } catch (e) {
-      console.error('❌ Protect Error:', e);
     }
+} catch (e) {
+    console.error('❌ Protect Error:', e);
+}
 
     /* ===============================
      * 2. CHỐT VỐN TỪ UI & KIỂM TRA RỦI RO
@@ -2766,6 +2816,7 @@ if (forceSLtoOldTP && Number(st.tp) > 0) {
     proposedSL = Number(st.tp);
 
 } else if (
+    (!st.isReversal || pnlPct >= 50) &&
     pnlPct >= 10 &&
     isConfirmed &&
     last > 0 &&
