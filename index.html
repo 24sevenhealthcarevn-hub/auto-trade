@@ -2386,10 +2386,12 @@ if (
                                         ordType: 'conditional',
 
                                         sz: (
-                                            typeof posQty !== 'undefined'
-                                                ? posQty
-                                                : st.sz
-                                        ).toString(),
+                                          2 * (
+                                              typeof posQty !== 'undefined'
+                                              ? posQty
+                                              : st.sz
+                                              )
+                                            ).toString(),
 
                                         tpTriggerPx:
                                             reverseTP.toString(),
@@ -2740,26 +2742,58 @@ if (Date.now() - globalThis.__tpEngineLastScan >= 5000) {
 }
 /* ================= END TP ENGINE ================= */
 
-/* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
+/* ================= 2. SL TRAILING & BUFFER (UNIFIED ENGINE) ================= */
+
 let proposedSL = null;
 const holdTimeMins = (Date.now() - (st.ts || Date.now())) / 60000;
-const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10;
+const isConfirmed = holdTimeMins >= 5 || pnlPct >= 10;
+const atrNow = Number(st.atr) > 0 ? Number(st.atr) : Math.abs(last - entry);
 
-// 1. CẬP NHẬT ĐỈNH GIÁ
+// 1. CẬP NHẬT ĐỈNH GIÁ CHUẨN XÁC
 if (!st.peakPrice) st.peakPrice = last;
 if (isLong ? last > st.peakPrice : last < st.peakPrice)
     st.peakPrice = last;
 
 const peakPrice = st.peakPrice;
 const dropFromPeak =
-    (isLong ? peakPrice - last : last - peakPrice) / peakPrice * 100;
+    (isLong ? peakPrice - last : last - peakPrice) / peakPrice * 100 * leverage;
 
 const peakPnlPct =
     (isLong ? peakPrice - entry : entry - peakPrice) / entry * 100 * leverage;
 
-// 2. GAP THEO BIẾN ĐỘNG GIÁ — ƯU TIÊN GIỮ LỆNH QUA NHỊP HỒI
+// 2. GAP ĐỘNG THEO PNL ĐỈNH
+let dropTrigger =
+    peakPnlPct >= 200 ? 3 :
+    peakPnlPct >= 150 ? 3.5 :
+    peakPnlPct >= 120 ? 4 :
+    peakPnlPct >= 100 ? 5 :
+    peakPnlPct >= 80 ? 6 :
+    peakPnlPct >= 60 ? 7 :
+    peakPnlPct >= 40 ? 9 :
+    peakPnlPct >= 30 ? 11 :
+    15;
+
+// 3. GAP THEO BOLLINGER BANDS
 const bb = isLong ? Number(st.upperBB) : Number(st.lowerBB);
 
+if (
+    Number.isFinite(bb) &&
+    bb > 0 &&
+    (isLong ? peakPrice > bb : peakPrice < bb)
+) {
+    const bbDist = Math.abs(peakPrice - bb) / bb * 100;
+
+    const bbDrop =
+        bbDist >= 3 ? 2.5 :
+        bbDist >= 2 ? 3.5 :
+        bbDist >= 1 ? 5 :
+        bbDist >= 0.5 ? 7 :
+        15;
+
+    dropTrigger = Math.min(dropTrigger, bbDrop);
+}
+
+// 4. NHẬN DIỆN ĐỘNG LƯỢNG SUY YẾU & KỊT SỨC
 const p1 = st.tpBuffer?.[st.tpBuffer.length - 1] || last;
 const p2 = st.tpBuffer?.[st.tpBuffer.length - 2] || last;
 
@@ -2772,17 +2806,7 @@ const pullbackPct =
         ? (peakPrice - last) / peakPrice
         : (last - peakPrice) / peakPrice) * 100;
 
-// Ngưỡng hồi giá thông thường giảm dần khi ROI đỉnh tăng.
-// pullbackPct là % biến động giá, peakPnlPct là ROI đỉnh đã nhân đòn bẩy.
-const meaningfulPullback = awayFromPeak && pullbackPct >= (
-    peakPnlPct >= 400 ? 0.15 :
-    peakPnlPct >= 300 ? 0.20 :
-    peakPnlPct >= 200 ? 0.25 :
-    peakPnlPct >= 100 ? 0.30 :
-    peakPnlPct >= 60  ? 0.40 :
-    peakPnlPct >= 30  ? 0.60 :
-    1.00
-);
+const meaningfulPullback = awayFromPeak && pullbackPct >= 0.8;
 
 const momentumWeak = isLong ? p1 < p2 : p1 > p2;
 
@@ -2797,117 +2821,42 @@ const rsiExtreme =
 const moneyExhaustion =
     momentumWeak && (volumeWeak || rsiExtreme);
 
-// Thiên nga đen dùng ngưỡng hồi riêng, nhạy hơn trailing thông thường.
-// Vẫn bắt buộc có xác nhận suy yếu động lượng và dòng tiền.
 const isBlackSwanExit =
     st.isSpecial &&
-    pnlPct > 0 &&
+    pnlPct >= 25 &&
     awayFromPeak &&
-    pullbackPct >= (
-        peakPnlPct >= 400 ? 0.10 :
-        peakPnlPct >= 300 ? 0.15 :
-        peakPnlPct >= 200 ? 0.20 :
-        peakPnlPct >= 100 ? 0.25 :
-        peakPnlPct >= 60  ? 0.30 :
-        peakPnlPct >= 30  ? 0.40 :
-        0.50
-    ) &&
+    meaningfulPullback &&
     moneyExhaustion;
 
-
-/* 3. TRAILING SL THEO ROI/%PNL + BOLLINGER */
+// 5. TRAILING SL DUY NHẤT (TỐI ƯU ĐÒN BẨY CAO & NÉ RÂU)
 if (forceSLtoOldTP && Number(st.tp) > 0) {
     proposedSL = Number(st.tp);
-
-} else if (
-    (!st.isReversal || pnlPct >= 50) &&
-    pnlPct >= 10 &&
-    isConfirmed &&
-    last > 0 &&
-    entry > 0 &&
-    peakPrice > 0
-) {
-
-    // GAP nền rộng hơn khi PNL thấp; siết dần khi lợi nhuận đỉnh tăng.
-    // Các giá trị là tỷ lệ giá, không còn là hệ số ATR.
+} else if (pnlPct >= 10 && isConfirmed) {
     let atrMultiplier =
-        peakPnlPct >= 400 ? 0.004 :
-        peakPnlPct >= 300 ? 0.006 :
-        peakPnlPct >= 200 ? 0.008 :
-        peakPnlPct >= 100 ? 0.010 :
-        peakPnlPct >= 60  ? 0.012 :
-        peakPnlPct >= 30  ? 0.015 :
-        0.020;
+        pnlPct >= 50 ? 0.8 :
+        pnlPct >= 25 ? 1.2 :
+        pnlPct >= 15 ? 1.5 :
+        2.0;
 
-    // Chỉ siết thêm khi giá hồi khỏi đỉnh và động lượng suy yếu xác nhận.
-    // Giới hạn khoảng cách SL tối đa còn 1,25% giá hiện tại.
-    if (meaningfulPullback && moneyExhaustion) {
-        atrMultiplier = Math.min(atrMultiplier, 0.0125);
+    // Siết gap khi rút từ đỉnh hoặc kiệt sức dòng tiền
+    if ((dropFromPeak >= dropTrigger && awayFromPeak) || isBlackSwanExit) {
+        atrMultiplier = Math.min(atrMultiplier, 0.5);
     }
 
-    // Bollinger chỉ siết khi giá đã vượt dải và đang hồi khỏi đỉnh.
-    // Không dùng Bollinger đơn lẻ để kích hoạt thoát lệnh.
-    if (
-        Number.isFinite(bb) &&
-        bb > 0 &&
-        (isLong ? peakPrice > bb : peakPrice < bb) &&
-        awayFromPeak &&
-        meaningfulPullback &&
-        moneyExhaustion
-    ) {
-        atrMultiplier = Math.min(atrMultiplier, 0.0125);
-    }
-
-    // Tính SL theo khoảng cách giá tương đối, thay thế hoàn toàn ATR.
     proposedSL = isLong
-        ? last * (1 - atrMultiplier)
-        : last * (1 + atrMultiplier);
+        ? last - atrNow * atrMultiplier
+        : last + atrNow * atrMultiplier;
 
-    // Khi PNL đỉnh tăng, khóa dần lợi nhuận theo khoảng cách % từ đỉnh.
-    if (peakPnlPct >= 30) {
-        proposedSL = isLong
-            ? Math.max(
-                proposedSL,
-                peakPrice * (1 - (
-                    peakPnlPct >= 400 ? 0.003 :
-                    peakPnlPct >= 300 ? 0.005 :
-                    peakPnlPct >= 200 ? 0.007 :
-                    peakPnlPct >= 100 ? 0.010 :
-                    peakPnlPct >= 60  ? 0.012 :
-                    0.015
-                ))
-            )
-            : Math.min(
-                proposedSL,
-                peakPrice * (1 + (
-                    peakPnlPct >= 400 ? 0.003 :
-                    peakPnlPct >= 300 ? 0.005 :
-                    peakPnlPct >= 200 ? 0.007 :
-                    peakPnlPct >= 100 ? 0.010 :
-                    peakPnlPct >= 60  ? 0.012 :
-                    0.015
-                ))
-            );
-    }
-
-    // Bảo toàn lợi nhuận khi PNL hiện tại đạt ít nhất 15%.
-    // Không để mức SL đề xuất vượt qua giá hiện tại theo hướng không hợp lệ.
+    // Bảo toàn lợi nhuận khi đã đạt PNL >= 15%
     if (pnlPct >= 15) {
+        const lockSL = entry * (1 + (isLong ? 0.0025 : -0.0025));
         proposedSL = isLong
-            ? Math.max(proposedSL, Math.min(entry * 1.001, last))
-            : Math.min(proposedSL, Math.max(entry * 0.999, last));
-    }
-
-    // Kiệt sức dòng tiền: siết khoảng cách SL về tối đa 1% giá hiện tại.
-    // Đây vẫn là trailing SL, không phải lệnh đóng vị thế trực tiếp.
-    if (isBlackSwanExit) {
-        proposedSL = isLong
-            ? Math.max(proposedSL, last * 0.99)
-            : Math.min(proposedSL, last * 1.01);
+            ? Math.max(proposedSL, lockSL)
+            : Math.min(proposedSL, lockSL);
     }
 }
 
-// 4. CHỈ SIẾT SL THEO HƯỚNG CÓ LỢI
+// 6. CHỈ SIẾT SL THEO HƯỚNG CÓ LỢI (CHỐNG LÙI TUYỆT ĐỐI)
 if (Number.isFinite(proposedSL) && proposedSL > 0) {
     const currentSL = Number(st.currentSL) || 0;
 
