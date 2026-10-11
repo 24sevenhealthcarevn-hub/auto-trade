@@ -2897,45 +2897,85 @@ if (st.sl) {
 
 let finalSL = bestSL;
 
-                /* ================= 4. GỬI LỆNH AMEND SL (TRAILING THẬT) ================= */
-if (finalSL && st.slAlgoId) {
+                
 
-    const currentSL = +st.currentSL || 0;
+
+/* ================= 4. GỬI LỆNH AMEND SL ================= */
+if (isBlackSwanExit && !st.blackSwanClosing) {
+    st.blackSwanClosing = true;
+
+    try {
+        const closeRes = await okxApiRequest('/trade/close-position', 'POST', {
+            instId: instId,
+            mgnMode: 'cross',
+            posSide: isLong ? 'long' : 'short'
+        });
+
+        if (closeRes?.code === '0') {
+            st.currentSL = Number(finalSL) || Number(st.currentSL) || 0;
+            st.lastTrail = Date.now();
+
+            if (typeof log === 'function')
+                log(`🚨 KIỆT SỨC DÒNG TIỀN — ĐÃ GỬI LỆNH ĐÓNG ${instId}`);
+            else
+                console.log(`🚨 KIỆT SỨC DÒNG TIỀN — ĐÃ GỬI LỆNH ĐÓNG ${instId}`);
+        } else {
+            st.blackSwanClosing = false;
+            const msg = closeRes?.msg || JSON.stringify(closeRes);
+            if (typeof log === 'function')
+                log(`❌ Đóng vị thế thất bại ${instId}: ${msg}`);
+            else
+                console.log(`❌ Đóng vị thế thất bại ${instId}: ${msg}`);
+        }
+    } catch (e) {
+        st.blackSwanClosing = false;
+        if (typeof log === 'function')
+            log(`❌ Đóng vị thế lỗi ${instId}: ${e.message}`);
+        else
+            console.log(`❌ Đóng vị thế lỗi ${instId}: ${e.message}`);
+    }
+} else if (Number.isFinite(Number(finalSL)) && Number(finalSL) > 0 && st.slAlgoId) {
+
+    const currentSL = Number(st.currentSL) || 0;
+    const nextSL = Number(finalSL);
 
     let needAmend = false;
 
     if (isLong) {
-        if (finalSL > currentSL) needAmend = true;
+        if (currentSL === 0 || nextSL > currentSL) needAmend = true;
     } else {
-        const cur = currentSL === 0 ? Infinity : currentSL;
-        if (finalSL < cur) needAmend = true;
+        if (currentSL === 0 || nextSL < currentSL) needAmend = true;
     }
 
-    // Anti spam + tránh lỗi 429
-    if (needAmend) {
-        if (!st.lastTrail || Date.now() - st.lastTrail > 5000) {
+    if (needAmend && (!st.lastTrail || Date.now() - st.lastTrail > 5000)) {
+        try {
+            const amendRes = await okxApiRequest('/trade/amend-algos', 'POST', {
+                instId: instId,
+                algoId: st.slAlgoId,
+                newSlTriggerPx: nextSL.toString(),
+                newSlOrdPx: "-1"
+            });
 
-            try {
-                const amendRes = await okxApiRequest('/trade/amend-algos', 'POST', {
-                    instId: instId,
-                    algoId: st.slAlgoId,          // QUAN TRỌNG
-                    newSlTriggerPx: finalSL.toString(),
-                    newSlOrdPx: "-1"
-                });
+            if (amendRes?.code === '0') {
+                st.currentSL = nextSL;
+                st.lastTrail = Date.now();
 
-                if (amendRes?.code === '0') {
-                    st.currentSL = finalSL;
-                    st.lastTrail = Date.now();
-
-                    if (typeof log === 'function') log(`🔁 TRAILING ${instId} → SL: ${finalSL}`);
-                    else console.log(`🔁 TRAILING ${instId} → SL: ${finalSL}`);
-                }
-
-            } catch (e) {
-                if (typeof log === 'function') log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
-                else console.log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
+                if (typeof log === 'function')
+                    log(`🔁 TRAILING ${instId} → SL: ${nextSL}`);
+                else
+                    console.log(`🔁 TRAILING ${instId} → SL: ${nextSL}`);
+            } else {
+                const msg = amendRes?.msg || JSON.stringify(amendRes);
+                if (typeof log === 'function')
+                    log(`❌ Amend SL thất bại ${instId}: ${msg}`);
+                else
+                    console.log(`❌ Amend SL thất bại ${instId}: ${msg}`);
             }
-
+        } catch (e) {
+            if (typeof log === 'function')
+                log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
+            else
+                console.log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
         }
     }
 }
