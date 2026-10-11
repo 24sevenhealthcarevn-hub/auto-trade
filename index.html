@@ -1436,6 +1436,8 @@ for (const t of top120Tickers) {
 async function masterFlow(qualityCandidates) {
   if (!isTrading) return;
 
+  try {
+    
 /* ===============================
  * 1. KIỂM TRA VỊ THẾ ĐANG MỞ
  * =============================== */
@@ -1458,6 +1460,7 @@ const openPositions = (posRes.data || []).filter(p => {
 });
 
 let openIds = new Set(openPositions.map(p => p.instId));
+
 
 
     if (false) {
@@ -1668,8 +1671,8 @@ for (const p of selectedPool) {
     // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
 
    /* ===============================
-   * 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
-   * =============================== */
+* 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT (GUARANTEED ENTRY FIX)
+* =============================== */
 
 // 🟢 FIX ĐIỂM NGHẼN: Cập nhật lại openIds thực tế từ OKX trước khi lặp (Tránh bị kẹt ID lệnh cũ)
 // Giả định biến openPositions chứa danh sách vị thế thực tế từ Bước 1
@@ -1831,7 +1834,7 @@ for (const p of pool) {
     console.error('❌ masterFlow error:', e);
   }
 }
-
+  
 /* ================== MONITORING & UI (FIXED) ================== */
 async function monitorOrders() {
     
@@ -1928,7 +1931,7 @@ if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
     });
 
     if (closeRes?.code === '0') {
-        const msg = `🛑 **SIÊU BOT TÂN HARD STOP: ${instId}**\n📉 PNL: ${pnlPct.toFixed(2)}%\n🛡️ Đã đóng Market (-70%).`;
+        const msg = `🛑 **SIÊU BOT TÂN HARD STOP: ${instId}**\n📉 PNL: ${pnlPct.toFixed(2)}%\n🛡️ Đã đóng Market (-50%).`;
         if (typeof sendTelegram === 'function') sendTelegram(msg).catch(() => {});
         // CHÈN DÒNG NÀY TẠI ĐÂY
         localStorage.setItem('last_exit_' + instId, Date.now().toString());
@@ -1938,7 +1941,8 @@ if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
     }
 }
 
-              /* ================= ĐẢO CHIỀU: -30%  ĐẾN -50% + TĂNG GẤP ĐÔI VỐN, ĐẶT TP 100% ================= */
+
+/* ================= ĐẢO CHIỀU: -30%  ĐẾN -50% + TĂNG GẤP ĐÔI VỐN, ĐẶT TP 100% ================= */
 if (true) {
 
     if (true) {
