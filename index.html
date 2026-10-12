@@ -1651,12 +1651,23 @@ const remainingSlots = MAX_POSITIONS - openIds.size;
 
 if (remainingSlots <= 0) return;
 
-// Chia slot mới theo LONG / SHORT
+// Chia slot mới theo LONG / SHORT (Cân bằng động)
 const longPool = pool.filter(p => p.side === 'buy');
 const shortPool = pool.filter(p => p.side === 'sell');
 
-const maxLong = Math.ceil(remainingSlots / 2);
-const maxShort = Math.floor(remainingSlots / 2);
+const longCount = openPositions.filter(p =>
+    p.posSide === 'long' || (p.posSide === 'net' && +p.pos > 0)
+).length;
+
+const shortCount = openPositions.filter(p =>
+    p.posSide === 'short' || (p.posSide === 'net' && +p.pos < 0)
+).length;
+
+const maxLong = Math.max(
+    0,
+    Math.min(remainingSlots, Math.ceil(remainingSlots / 2) + shortCount - longCount)
+);
+const maxShort = Math.max(0, remainingSlots - maxLong);
 
 const selectedPool = [
     ...longPool.slice(0, maxLong),
@@ -1667,7 +1678,6 @@ for (const p of selectedPool) {
     if (openIds.size >= MAX_POSITIONS) break;
     if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
     if (openIds.has(p.instId)) continue;
-
     // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
 
    /* ===============================
@@ -1918,7 +1928,7 @@ if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
     });
 
     if (closeRes?.code === '0') {
-        const msg = `🛑 **SIÊU BOT TÂN HARD STOP: ${instId}**\n📉 PNL: ${pnlPct.toFixed(2)}%\n🛡️ Đã đóng Market (-50%).`;
+        const msg = `🛑 **SIÊU BOT TÂN HARD STOP: ${instId}**\n📉 PNL: ${pnlPct.toFixed(2)}%\n🛡️ Đã đóng Market (-70%).`;
         if (typeof sendTelegram === 'function') sendTelegram(msg).catch(() => {});
         // CHÈN DÒNG NÀY TẠI ĐÂY
         localStorage.setItem('last_exit_' + instId, Date.now().toString());
@@ -1928,10 +1938,7 @@ if (pnlPct <= -50 && (st?.sl || st?.currentSL)) {
     }
 }
 
-
-/* ================= ĐẢO CHIỀU: -30%  ĐẾN -50% + TĂNG GẤP ĐÔI VỐN, ĐẶT TP 100% ================= */
-if (true) {
-
+             /* ================= ĐẢO CHIỀU: -30%  ĐẾN -50% + TĂNG GẤP ĐÔI VỐN, ĐẶT TP 100% ================= */
     if (true) {
 
         try {
@@ -2455,7 +2462,7 @@ if (
             );
         }
     }
-}        
+
 
 /* ================= 1. TP & BUFFER (DYNAMIC TP + EXHAUSTION EXIT) ================= */
 
@@ -2877,7 +2884,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
  * ======================================================= */
 
     if (
-        pnlPct > 0 &&
+        pnlPct >= tpThreshold &&
         (
             (
                 dropFromPeak >= dropTrigger &&
@@ -2951,7 +2958,8 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
     finalTP = st.tp || st.currentTP;
 }
 
-              /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
+              
+/* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
 let proposedSL = null; 
 const holdTimeMins = (Date.now() - st.ts) / 60000;
 const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10; 
@@ -2960,21 +2968,49 @@ const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10;
 if (forceSLtoOldTP && st.tp) {
     proposedSL = +(st.currentTP || st.tp); 
 } 
-// 2. REVERSAL / LÃI CỰC LỚN (>= 50%): Siết cực chặt bằng ATR nhỏ hoặc bám đỉnh
-else if ((st.tradeCase?.includes("Rev") && pnlPct >= 30) || pnlPct >= 50) {
-    proposedSL = isLong ? last - (st.atr * 1.0) : last + (st.atr * 1.0); // Siết chặt 1.0 ATR
+// 2. REVERSAL / LÃI CỰC LỚN: Khóa ROI đỉnh trừ khoảng trả lại 5–10 điểm ROI
+else if (((st.tradeCase?.includes("Rev") && pnlPct >= 30) || pnlPct >= 50) && isConfirmed) {
+    proposedSL = entry * (1 + (isLong ? Math.max(0, (Number(st.peakROI ?? pnlPct) - 7.5) / 100) : -Math.max(0, (Number(st.peakROI ?? pnlPct) - 7.5) / 100)) / Math.max(1, Math.min(Number(leverage) || 1, 50)));
 }
-// 3. LÃI TRUNG BÌNH CAO (25% - 50%) && Đã xác nhận thời gian
+// 3. LÃI TRUNG BÌNH CAO (25% - 50%): Khóa ROI đỉnh trừ khoảng trả lại 5–10 điểm ROI
 else if (pnlPct >= 25 && isConfirmed) { 
-    proposedSL = isLong ? last - (st.atr * 1.5) : last + (st.atr * 1.5);
+    proposedSL = entry * (1 + (isLong ? Math.max(0, (Number(st.peakROI ?? pnlPct) - 7.5) / 100) : -Math.max(0, (Number(st.peakROI ?? pnlPct) - 7.5) / 100)) / Math.max(1, Math.min(Number(leverage) || 1, 50)));
 }
-// 4. LÃI KHỞI ĐẦU AN TOÀN (15% - 25%): Bảo toàn vốn, dời SL qua Entry + phí
-else if (pnlPct >= 15 && isConfirmed) {
-    proposedSL = entry * (1 + (isLong ? 0.003 : -0.003)); 
+// 4. LÃI TRUNG BÌNH (20% - 25%): Khóa nhẹ, chừa nhịp hồi
+else if (pnlPct >= 20 && isConfirmed) {
+    proposedSL = entry * (1 + (isLong ? Math.max(0, (Number(st.peakROI ?? pnlPct) - 10) / 100) : -Math.max(0, (Number(st.peakROI ?? pnlPct) - 10) / 100)) / Math.max(1, Math.min(Number(leverage) || 1, 50)));
 }
-// 5. GIA ĐOẠN ĐẦU (10% - 15%): Kê SL rộng hơn một chút để chống quét râu nến
+// 5. GIAI ĐOẠN ĐẦU (10% - 20%): Chưa khóa sát, tránh nhiễu
 else if (pnlPct >= 10 && isConfirmed) {
-    proposedSL = isLong ? last - (st.atr * 2.0) : last + (st.atr * 2.0); // Dùng 2.0 ATR cho thoáng
+    proposedSL = entry * (1 + (isLong ? Math.max(0, (Number(st.peakROI ?? pnlPct) - 10) / 100) : -Math.max(0, (Number(st.peakROI ?? pnlPct) - 10) / 100)) / Math.max(1, Math.min(Number(leverage) || 1, 50)));
+}
+
+// 6. BOLLINGER: Chỉ xác nhận nhịp hồi, không kéo SL ra xa khỏi mức ROI đã tính
+if (
+    Number.isFinite(proposedSL) &&
+    proposedSL > 0 &&
+    Number(st.atr) > 0 &&
+    isConfirmed
+) {
+    if (
+        isLong &&
+        Number.isFinite(Number(st.lowerBB)) &&
+        Number(st.lowerBB) > 0 &&
+        last < Number(st.lowerBB) &&
+        pnlPct > 0
+    ) {
+        proposedSL = Math.max(proposedSL, last - Number(st.atr) * 0.5);
+    }
+
+    if (
+        !isLong &&
+        Number.isFinite(Number(st.upperBB)) &&
+        Number(st.upperBB) > 0 &&
+        last > Number(st.upperBB) &&
+        pnlPct > 0
+    ) {
+        proposedSL = Math.min(proposedSL, last + Number(st.atr) * 0.5);
+    }
 }
 
 /* ================= 3. ĐẢM BẢO SL CHỈ TIẾN KHÔNG LÙI (FIXED) ================= */
