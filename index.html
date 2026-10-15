@@ -1699,7 +1699,6 @@ for (const p of selectedPool) {
         const now = Date.now();
 
         try {
-            try {
         // FIX LỖI 1: Chuẩn hóa side về chữ thường ('buy' hoặc 'sell')
         const sideLower = String(p.side).toLowerCase();
         if (sideLower !== 'buy' && sideLower !== 'sell') continue;
@@ -2975,7 +2974,7 @@ if (pnlPct >= tpThreshold || st.peakPrice) {
 /* ================= 2. SL TRAILING & BUFFER (ĐÃ ĐỒNG BỘ VỚI TP) ================= */
 let proposedSL = null; 
 const holdTimeMins = (Date.now() - st.ts) / 60000;
-const isConfirmed = holdTimeMins >= 10 || pnlPct >= 10; 
+const isConfirmed = holdTimeMins >= 10 || pnlPct >= 50; 
 
 // 1. ƯU TIÊN CAO NHẤT: Khi TP động (Shadow TP) đã kích hoạt, khóa SL ngay theo cấu trúc đã định
 if (forceSLtoOldTP && st.tp) {
@@ -3056,85 +3055,45 @@ if (st.sl) {
 
 let finalSL = bestSL;
 
-                
+                /* ================= 4. GỬI LỆNH AMEND SL (TRAILING THẬT) ================= */
+if (finalSL && st.slAlgoId) {
 
-
-/* ================= 4. GỬI LỆNH AMEND SL ================= */
-if (isBlackSwanExit && !st.blackSwanClosing) {
-    st.blackSwanClosing = true;
-
-    try {
-        const closeRes = await okxApiRequest('/trade/close-position', 'POST', {
-            instId: instId,
-            mgnMode: 'cross',
-            posSide: isLong ? 'long' : 'short'
-        });
-
-        if (closeRes?.code === '0') {
-            st.currentSL = Number(finalSL) || Number(st.currentSL) || 0;
-            st.lastTrail = Date.now();
-
-            if (typeof log === 'function')
-                log(`🚨 KIỆT SỨC DÒNG TIỀN — ĐÃ GỬI LỆNH ĐÓNG ${instId}`);
-            else
-                console.log(`🚨 KIỆT SỨC DÒNG TIỀN — ĐÃ GỬI LỆNH ĐÓNG ${instId}`);
-        } else {
-            st.blackSwanClosing = false;
-            const msg = closeRes?.msg || JSON.stringify(closeRes);
-            if (typeof log === 'function')
-                log(`❌ Đóng vị thế thất bại ${instId}: ${msg}`);
-            else
-                console.log(`❌ Đóng vị thế thất bại ${instId}: ${msg}`);
-        }
-    } catch (e) {
-        st.blackSwanClosing = false;
-        if (typeof log === 'function')
-            log(`❌ Đóng vị thế lỗi ${instId}: ${e.message}`);
-        else
-            console.log(`❌ Đóng vị thế lỗi ${instId}: ${e.message}`);
-    }
-} else if (Number.isFinite(Number(finalSL)) && Number(finalSL) > 0 && st.slAlgoId) {
-
-    const currentSL = Number(st.currentSL) || 0;
-    const nextSL = Number(finalSL);
+    const currentSL = +st.currentSL || 0;
 
     let needAmend = false;
 
     if (isLong) {
-        if (currentSL === 0 || nextSL > currentSL) needAmend = true;
+        if (finalSL > currentSL) needAmend = true;
     } else {
-        if (currentSL === 0 || nextSL < currentSL) needAmend = true;
+        const cur = currentSL === 0 ? Infinity : currentSL;
+        if (finalSL < cur) needAmend = true;
     }
 
-    if (needAmend && (!st.lastTrail || Date.now() - st.lastTrail > 5000)) {
-        try {
-            const amendRes = await okxApiRequest('/trade/amend-algos', 'POST', {
-                instId: instId,
-                algoId: st.slAlgoId,
-                newSlTriggerPx: nextSL.toString(),
-                newSlOrdPx: "-1"
-            });
+    // Anti spam + tránh lỗi 429
+    if (needAmend) {
+        if (!st.lastTrail || Date.now() - st.lastTrail > 5000) {
 
-            if (amendRes?.code === '0') {
-                st.currentSL = nextSL;
-                st.lastTrail = Date.now();
+            try {
+                const amendRes = await okxApiRequest('/trade/amend-algos', 'POST', {
+                    instId: instId,
+                    algoId: st.slAlgoId,          // QUAN TRỌNG
+                    newSlTriggerPx: finalSL.toString(),
+                    newSlOrdPx: "-1"
+                });
 
-                if (typeof log === 'function')
-                    log(`🔁 TRAILING ${instId} → SL: ${nextSL}`);
-                else
-                    console.log(`🔁 TRAILING ${instId} → SL: ${nextSL}`);
-            } else {
-                const msg = amendRes?.msg || JSON.stringify(amendRes);
-                if (typeof log === 'function')
-                    log(`❌ Amend SL thất bại ${instId}: ${msg}`);
-                else
-                    console.log(`❌ Amend SL thất bại ${instId}: ${msg}`);
+                if (amendRes?.code === '0') {
+                    st.currentSL = finalSL;
+                    st.lastTrail = Date.now();
+
+                    if (typeof log === 'function') log(`🔁 TRAILING ${instId} → SL: ${finalSL}`);
+                    else console.log(`🔁 TRAILING ${instId} → SL: ${finalSL}`);
+                }
+
+            } catch (e) {
+                if (typeof log === 'function') log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
+                else console.log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
             }
-        } catch (e) {
-            if (typeof log === 'function')
-                log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
-            else
-                console.log(`❌ Amend SL lỗi ${instId}: ${e.message}`);
+
         }
     }
 }
@@ -3220,48 +3179,6 @@ if (isBlackSwanExit && !st.blackSwanClosing) {
         localStorage.setItem('okx_active_orders', JSON.stringify(activeOrders));
         if (typeof renderUI === 'function') renderUI(); 
     } catch (e) { console.error("Lỗi Monitor Tổng:", e); }
-}
-
-/* ================== HÀM LƯU TRỮ DỮ LIỆU ================== */
-function saveOrders() {
-    try {
-        // ===== FIX LOCALSTORAGE CONFLICT (ĐỒNG BỘ THEO DỮ LIỆU THỰC TẾ) =====
-        const oldActive = JSON.parse(
-            localStorage.getItem('okx_active_orders') || '{}'
-        );
-
-        // Thay vì gộp mù quáng (khiến lệnh cũ không mất đi), 
-        // ta chỉ giữ lại những lệnh thực sự đang tồn tại trong biến RAM 'activeOrders'
-        const mergedActive = {};
-
-        for (const k in activeOrders) {
-            // Cập nhật thông tin mới nhất vào bản ghi, giữ lại thuộc tính cũ nếu cần
-            mergedActive[k] = {
-                ordType: 'oco',
-                ...(oldActive[k] || {}),
-                ...(activeOrders[k] || {})
-            };
-        }
-
-        // Lưu bản ghi đã được dọn dẹp (chỉ chứa các lệnh thực tế đang chạy)
-        localStorage.setItem(
-            'okx_active_orders',
-            JSON.stringify(mergedActive)
-        );
-
-        // Lịch sử giao dịch giữ nguyên hành vi cũ
-        localStorage.setItem(
-            'okx_trade_history',
-            JSON.stringify(tradeHistory)
-        );
-
-        // Đồng bộ lại RAM - Đảm bảo RAM không chứa các "lệnh ma" đã bị xóa ở trên
-        activeOrders = mergedActive;
-
-        console.log("💾 Đã lưu trạng thái lệnh và lịch sử vào máy.");
-    } catch (e) {
-        console.error("❌ Không thể lưu dữ liệu vào LocalStorage:", e);
-    }
 }
 
 
