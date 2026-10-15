@@ -2826,6 +2826,9 @@ const holdTimeMins = (Date.now() - (st.ts || Date.now())) / 60000;
 const isConfirmed = holdTimeMins >= 15 || pnlPct >= 50;
 const atrNow = Number(st.atr) > 0 ? Number(st.atr) : Math.abs(last - entry);
 
+// KIỂM TRA XEM LỆNH BAN ĐẦU CÓ CÀI SL HAY KHÔNG
+const hasOriginalSL = Boolean(st.sl || st.currentSL);
+
 // 1. CẬP NHẬT ĐỈNH GIÁ CHUẨN XÁC
 if (!st.peakPrice) st.peakPrice = last;
 if (isLong ? last > st.peakPrice : last < st.peakPrice)
@@ -2905,10 +2908,10 @@ const isBlackSwanExit =
     meaningfulPullback &&
     moneyExhaustion;
 
-// 5. TRAILING SL DUY NHẤT (TỐI ƯU ĐÒN BẨY CAO & NÉ RÂU)
+// 5. TRAILING SL DUY NHẤT (CHỈ CHẠY KHI CÓ SL BAN ĐẦU HOẶC KHÓA TP CŨ)
 if (forceSLtoOldTP && Number(st.tp) > 0) {
     proposedSL = Number(st.tp);
-} else if (pnlPct >= 10 && isConfirmed) {
+} else if (hasOriginalSL && pnlPct >= 10 && isConfirmed) {
     let atrMultiplier =
         pnlPct >= 50 ? 0.8 :
         pnlPct >= 25 ? 1.2 :
@@ -3064,40 +3067,98 @@ if (finalSL && st.slAlgoId) {
                     }
 
                     /* ================= 7. ĐẶT LỆNH DUY NHẤT ================= */
-                    const finalOrdType = roundedTP ? 'oco' : 'conditional';
-                    const payload = {
-                        instId, tdMode: 'cross', side: isLong ? 'sell' : 'buy',
-                        posSide: isLong ? 'long' : 'short', ordType: finalOrdType,
-                        sz: posQty.toString(), slTriggerPx: finalSL.toString(), slOrdPx: '-1'
-                    };
-                    if (roundedTP) {
-                        payload.tpTriggerPx = roundedTP.toString();
-                        payload.tpOrdPx = '-1';
-                    }
+                // Nếu không có cả TP lẫn SL thì không gửi lệnh algo
+                if (!roundedTP && !finalSL) continue;
 
-                    const res = await okxApiRequest('/trade/order-algo', 'POST', payload);
+                // Xác định loại lệnh: nếu có đủ TP và SL thì dùng 'oco', ngược lại dùng 'conditional'
+                const finalOrdType = (roundedTP && finalSL) ? 'oco' : 'conditional';
+                
+                const payload = {
+                    instId, 
+                    tdMode: 'cross', 
+                    side: isLong ? 'sell' : 'buy',
+                    posSide: isLong ? 'long' : 'short', 
+                    ordType: finalOrdType,
+                    sz: posQty.toString()
+                };
 
-                    if (res?.code === '0') {
-                        st.currentTP = roundedTP;
-                        st.currentSL = finalSL;
-                        st.slAlgoId = res.data?.[0]?.algoId || st.slAlgoId;
-                        st.lastTrail = Date.now();
-                        
-                        const logMsg = `🔄 **SIÊU BOT TÂN DỜI TP/SL: ${instId}**\n` +
-                                     `💰 PNL: ${pnlPct.toFixed(2)}% (x${leverage})\n` +
-                                     `🎯 TP: ${roundedTP || 'Gồng trend (Đã gỡ TP)'}\n` +
-                                     `🛡️ SL: ${finalSL} ${forceSLtoOldTP ? '(Đã khóa TP cũ)' : ''}`;
-                        
-                        if (typeof sendTelegram === 'function') sendTelegram(logMsg).catch(() => {});
-                        console.log(`✅ [SUCCESS] ${instId}: Đã dời SL đến ${finalSL}`);
-                    }
+                // Chỉ đưa TP vào payload nếu tồn tại roundedTP
+                if (roundedTP) {
+                    payload.tpTriggerPx = roundedTP.toString();
+                    payload.tpOrdPx = '-1';
                 }
 
-            } catch (err) { console.error(`Lỗi Monitor ${p.instId}:`, err); }
+                // Chỉ đưa SL vào payload nếu tồn tại finalSL
+                if (finalSL) {
+                    payload.slTriggerPx = finalSL.toString();
+                    payload.slOrdPx = '-1';
+                }
+
+                const res = await okxApiRequest('/trade/order-algo', 'POST', payload);
+
+                if (res?.code === '0') {
+                    st.currentTP = roundedTP;
+                    st.currentSL = finalSL;
+                    st.slAlgoId = res.data?.[0]?.algoId || st.slAlgoId;
+                    st.lastTrail = Date.now();
+                    
+                    const logMsg = `🔄 **SIÊU BOT TÂN DỜI TP/SL: ${instId}**\n` +
+                                   `💰 PNL: ${pnlPct.toFixed(2)}% (x${leverage})\n` +
+                                   `🎯 TP: ${roundedTP || 'Gồng trend (Đã gỡ TP)'}\n` +
+                                   `🛡️ SL: ${finalSL ? finalSL + (forceSLtoOldTP ? ' (Đã khóa TP cũ)' : '') : 'Không có SL'}`;
+                    
+                    if (typeof sendTelegram === 'function') sendTelegram(logMsg).catch(() => {});
+                    console.log(`✅ [SUCCESS] ${instId}: Đã cập nhật lệnh thành công`);
+                }
+            }
+
+        } catch (err) { console.error(`Lỗi Monitor ${p.instId}:`, err); }
+    }
+    localStorage.setItem('okx_active_orders', JSON.stringify(activeOrders));
+    if (typeof renderUI === 'function') renderUI(); 
+} catch (e) { console.error("Lỗi Monitor Tổng:", e); }
+}
+
+/* ================== HÀM LƯU TRỮ DỮ LIỆU ================== */
+function saveOrders() {
+    try {
+        // ===== FIX LOCALSTORAGE CONFLICT (ĐỒNG BỘ THEO DỮ LIỆU THỰC TẾ) =====
+        const oldActive = JSON.parse(
+            localStorage.getItem('okx_active_orders') || '{}'
+        );
+
+        // Thay vì gộp mù quáng (khiến lệnh cũ không mất đi), 
+        // ta chỉ giữ lại những lệnh thực sự đang tồn tại trong biến RAM 'activeOrders'
+        const mergedActive = {};
+
+        for (const k in activeOrders) {
+            // Cập nhật thông tin mới nhất vào bản ghi, giữ lại thuộc tính cũ nếu cần
+            mergedActive[k] = {
+                ordType: 'oco',
+                ...(oldActive[k] || {}),
+                ...(activeOrders[k] || {})
+            };
         }
-        localStorage.setItem('okx_active_orders', JSON.stringify(activeOrders));
-        if (typeof renderUI === 'function') renderUI(); 
-    } catch (e) { console.error("Lỗi Monitor Tổng:", e); }
+
+        // Lưu bản ghi đã được dọn dẹp (chỉ chứa các lệnh thực tế đang chạy)
+        localStorage.setItem(
+            'okx_active_orders',
+            JSON.stringify(mergedActive)
+        );
+
+        // Lịch sử giao dịch giữ nguyên hành vi cũ
+        localStorage.setItem(
+            'okx_trade_history',
+            JSON.stringify(tradeHistory)
+        );
+
+        // Đồng bộ lại RAM - Đảm bảo RAM không chứa các "lệnh ma" đã bị xóa ở trên
+        activeOrders = mergedActive;
+
+        console.log("💾 Đã lưu trạng thái lệnh và lịch sử vào máy.");
+    } catch (e) {
+        console.error("❌ Không thể lưu dữ liệu vào LocalStorage:", e);
+    }
 }
 
 /* ================== HÀM LƯU TRỮ DỮ LIỆU ================== */
