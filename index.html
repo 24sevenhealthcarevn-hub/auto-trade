@@ -1678,7 +1678,7 @@ for (const p of selectedPool) {
     if (openIds.size >= MAX_POSITIONS) break;
     if (!p?.instId || !p.side || !p.tp || !p.sl) continue;
     if (openIds.has(p.instId)) continue;
-    // GIỮ NGUYÊN toàn bộ code đặt lệnh bên dưới
+}
 
    /* ===============================
      * 4. LOOP VÀO LỆNH VỚI VỐN ĐÃ CHỐT
@@ -1699,17 +1699,25 @@ for (const p of selectedPool) {
         const now = Date.now();
 
         try {
-            const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${p.instId}`);
-    const info = instRes?.data?.[0];
-    if (!info) continue;
+            try {
+        // FIX LỖI 1: Chuẩn hóa side về chữ thường ('buy' hoặc 'sell')
+        const sideLower = String(p.side).toLowerCase();
+        if (sideLower !== 'buy' && sideLower !== 'sell') continue;
 
-    const ctVal = parseFloat(info.ctVal);
-    const lotSz = parseFloat(info.lotSz);
-    const tickSz = parseFloat(info.tickSz);
-    const minSz = parseFloat(info.minSz || lotSz);
+        // Xác định posSide chính xác 100% không lo lỗi hoa/thường
+        const posSide = sideLower === 'buy' ? 'long' : 'short';
 
-    const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
-    const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
+        const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${p.instId}`);
+        const info = instRes?.data?.[0];
+        if (!info) continue;
+
+        const ctVal = parseFloat(info.ctVal);
+        const lotSz = parseFloat(info.lotSz);
+        const tickSz = parseFloat(info.tickSz);
+        const minSz = parseFloat(info.minSz || lotSz);
+
+        const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
+        const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
 
     // 3️⃣ VÒNG LẶP HẠ ĐÒN BẨY TỪ UI XUỐNG VÀ KIỂM SOÁT KÝ QUỸ KHÔNG ĐỘI VỐN
     let currentLeverage = parseInt(document.getElementById('leverage')?.value || 50);
@@ -1767,8 +1775,20 @@ for (const p of selectedPool) {
 
     if (!leverageFixed || !finalQty) continue;
 
-    const tpStr = (Math.round(p.tp / tickSz) * tickSz).toFixed(pPrec);
-    const slStr = (Math.round(p.sl / tickSz) * tickSz).toFixed(pPrec);
+    // Kiểm tra và ép biên độ an toàn cho TP và SL trước khi làm tròn
+    let safeTp = p.tp;
+    let safeSl = p.sl;
+
+    if (posSide === 'long') {
+        if (safeTp <= p.last) safeTp = p.last + (tickSz * 10); 
+        if (safeSl >= p.last) safeSl = p.last - (tickSz * 10);
+    } else {
+        if (safeTp >= p.last) safeTp = p.last - (tickSz * 10);
+        if (safeSl <= p.last) safeSl = p.last + (tickSz * 10);
+    }
+
+    const tpStr = (Math.round(safeTp / tickSz) * tickSz).toFixed(pPrec);
+    const slStr = (Math.round(safeSl / tickSz) * tickSz).toFixed(pPrec);
 
     const res = await okxApiRequest('/trade/order', 'POST', {
         instId: p.instId,
