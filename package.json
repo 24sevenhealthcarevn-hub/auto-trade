@@ -1,5 +1,5 @@
 {
-  "name": "auto-trade",
+  "name": "tanbot",
   "version": "1.0.0",
   "description": "OKX Trading Bot",
   "main": "server.js",
@@ -9,8 +9,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "axios": "^1.7.2",
-    "cors": "^2.8.5",
-    "ws": "^8.16.0"
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
