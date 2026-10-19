@@ -60,7 +60,7 @@ th{color:var(--muted);font-weight:600}
     </div>
     <div class="config-group">
       <span class="config-label">Đòn bẩy:</span>
-      <input type="number" id="leverage" class="config-input" value="20" min="1" max="100">
+      <input type="number" id="leverage" class="config-input" value="50" min="1" max="100">
     </div>
     <div class="config-group">
       <span class="config-label">Kích thước lệnh tối đa (USDT):</span>
@@ -741,6 +741,7 @@ const minSz = parseFloat(info.minSz || lotSz);
 const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
 const tickSz = parseFloat(info.tickSz);
+
 // Kiểm tra giới hạn tối đa 10 vị thế thực tế trên OKX
 const positionsRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
 if (positionsRes?.code !== '0') {
@@ -762,7 +763,6 @@ let currentLeverage = leverage;
 let qtyStr = "";
 let leverageFixed = false;
 
-// Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
 // Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
 while (currentLeverage >= 1) {
     // Công thức chuẩn: Vị thế = Vốn (Ký quỹ) x Đòn bẩy
@@ -817,6 +817,11 @@ while (currentLeverage >= 1) {
         log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
         return null;
     }
+}
+
+if (!leverageFixed || !qtyStr) {
+    log(`❌ ${instId}: Không thể thiết lập đòn bẩy phù hợp hoặc vốn không đủ ký quỹ.`);
+    return null;
 }
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
