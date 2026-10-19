@@ -722,119 +722,92 @@ if (!apiKey) {
 }
 
   try {
-    // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
-let instRes = null;
-try {
-  const response = await fetch(`https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=${instId}`);
-  instRes = await response.json();
-} catch (err) {
-  log(`❌ Lỗi lấy thông tin instrument cho ${instId}: ${err.message}`);
-  return null;
-}
+   // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
+    const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
+    const info = instRes?.data?.[0];
+    if (!info) {
+        log(`❌ ${instId}: Không lấy được thông tin hợp đồng.`);
+        return null;
+    }
 
-const info = instRes?.data?.[0];
-if (!info) return null;
+    const ctVal = parseFloat(info.ctVal);
+    const lotSz = parseFloat(info.lotSz);
+    const minSz = parseFloat(info.minSz || lotSz);
+    const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
-const ctVal = parseFloat(info.ctVal);
-const lotSz = parseFloat(info.lotSz);
-const minSz = parseFloat(info.minSz || lotSz);
-const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
-const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
-const tickSz = parseFloat(info.tickSz);
-
-// Kiểm tra giới hạn tối đa 10 vị thế thực tế trên OKX
-const positionsRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
-if (positionsRes?.code !== '0') {
-  log(`❌ Không thể kiểm tra vị thế hiện tại trước khi vào lệnh ${instId}.`);
-  return null;
-}
-
-const openPositions = (positionsRes.data || []).filter(p => Math.abs(parseFloat(p.pos || 0)) > 0);
-if (openPositions.length >= 10) {
-  log(`⚠️ Đã đạt giới hạn tối đa 10 vị thế đang chạy.`);
-  return null;
-}
-if (openPositions.some(p => p.instId === instId)) {
-  log(`⚠️ ${instId}: Vị thế đã tồn tại, bỏ qua lệnh mới.`);
-  return null;
-}
-
-let currentLeverage = leverage;
-let qtyStr = "";
-let leverageFixed = false;
-
-// Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
-
-while (currentLeverage >= 1) {
-    // Kiểm tra dữ liệu hợp đồng và giá
     if (!Number.isFinite(price) || price <= 0 ||
+        !Number.isFinite(capital) || capital <= 0 ||
         !Number.isFinite(ctVal) || ctVal <= 0 ||
         !Number.isFinite(lotSz) || lotSz <= 0 ||
         !Number.isFinite(minSz) || minSz <= 0) {
-        log(`❌ ${instId}: Dữ liệu price/ctVal/lotSz/minSz không hợp lệ.`);
+        log(`❌ ${instId}: Giá, vốn hoặc thông số hợp đồng không hợp lệ.`);
         return null;
     }
 
-    // Tính khối lượng theo vốn giao diện và đòn bẩy hiện tại
-    let rawQty = (capital * currentLeverage) / (price * ctVal);
-    let qty = Math.floor((rawQty + 1e-10) / lotSz) * lotSz;
+    let currentLeverage = Math.min(50, Math.max(1, Math.floor(Number(leverage) || 1)));
+    let qtyStr = "";
+    let leverageFixed = false;
 
-    // Làm tròn theo độ chính xác của lotSz
-    qty = Number(qty.toFixed(qPrec));
+    while (currentLeverage >= 1) {
+        // Vốn giao diện là ký quỹ mục tiêu: Giá trị vị thế = vốn × đòn bẩy
+        let rawQty = (capital * currentLeverage) / (price * ctVal);
+        let qty = Math.floor((rawQty + 1e-10) / lotSz) * lotSz;
+        qty = Number(qty.toFixed(qPrec));
 
-    // Chỉ nâng lên minSz nếu vốn vẫn đủ ký quỹ
-    if (qty < minSz && rawQty >= minSz) {
-        qty = minSz;
+        if (qty < minSz) {
+            log(`❌ ${instId}: Khối lượng ${qty} thấp hơn minSz ${minSz} ở ${currentLeverage}x; vốn không đủ.`);
+            return null;
+        }
+
+        let actualMargin = (qty * price * ctVal) / currentLeverage;
+
+        // Không vượt vốn nhập; sai lệch do lotSz cần xử lý bằng cách giảm qty một lô
+        while (qty >= minSz && actualMargin > capital + 1e-8) {
+            qty = Number((qty - lotSz).toFixed(qPrec));
+            if (qty < minSz) break;
+            actualMargin = (qty * price * ctVal) / currentLeverage;
+        }
+
+        if (qty < minSz || !Number.isFinite(actualMargin) || actualMargin <= 0 ||
+            actualMargin > capital + 1e-8) {
+            log(`❌ ${instId}: Không tìm được khối lượng hợp lệ trong vốn ${capital} USDT.`);
+            return null;
+        }
+
+        const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
+            instId,
+            lever: currentLeverage.toString(),
+            mgnMode: 'cross'
+        });
+
+        if (levRes?.code === '0') {
+            qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
+            leverageFixed = true;
+            log(`✅ ${instId}: ${currentLeverage}x | Vốn mục tiêu: ${capital} USDT | Ký quỹ dự kiến: ${actualMargin.toFixed(4)} USDT`);
+            break;
+        } else if (levRes?.code === '59102') {
+            // OKX giới hạn đòn bẩy -> hạ xuống mức tiếp theo
+            if (currentLeverage > 50) currentLeverage = 50;
+            else if (currentLeverage > 30) currentLeverage = 30;
+            else if (currentLeverage > 20) currentLeverage = 20;
+            else if (currentLeverage > 10) currentLeverage = 10;
+            else if (currentLeverage > 5) currentLeverage = 5;
+            else if (currentLeverage > 3) currentLeverage = 3;
+            else if (currentLeverage > 2) currentLeverage = 2;
+            else if (currentLeverage > 1) currentLeverage = 1;
+            else break;
+
+            log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x`);
+        } else {
+            log(`❌ Set leverage lỗi ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
+            return null;
+        }
     }
 
-    let actualMargin = (qty * price * ctVal) / currentLeverage;
-
-    // Không đủ khối lượng tối thiểu: hạ đòn bẩy không giải quyết được
-    if (qty < minSz) {
-        log(`❌ ${instId}: Vốn ${capital} USDT không đủ minSz ở ${currentLeverage}x.`);
+    if (!leverageFixed || !qtyStr) {
+        log(`❌ ${instId}: Không thiết lập được đòn bẩy phù hợp.`);
         return null;
     }
-
-    // Không cho phép ký quỹ vượt vốn nhập
-    if (!Number.isFinite(actualMargin) ||
-        actualMargin <= 0 ||
-        actualMargin > capital + 1e-8) {
-        log(`❌ ${instId}: Ký quỹ ${actualMargin} vượt vốn ${capital} USDT.`);
-        return null;
-    }
-
-    const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
-        instId,
-        lever: currentLeverage.toString(),
-        mgnMode: 'cross',
-        posSide: String(side).toLowerCase() === 'buy' ? 'long' : 'short'
-    });
-
-    if (levRes?.code === '0') {
-        qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
-        leverageFixed = true;
-        break;
-    } else if (levRes?.code === '59102') {
-        // OKX giới hạn đòn bẩy -> hạ xuống mức tiếp theo
-        if (currentLeverage > 50) currentLeverage = 50;
-        else if (currentLeverage > 30) currentLeverage = 30;
-        else if (currentLeverage > 20) currentLeverage = 20;
-        else if (currentLeverage > 10) currentLeverage = 10;
-        else if (currentLeverage > 5) currentLeverage = 5;
-        else if (currentLeverage > 3) currentLeverage = 3;
-        else if (currentLeverage > 2) currentLeverage = 2;
-        else if (currentLeverage > 1) currentLeverage = 1;
-        else break;
-    } else {
-        log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
-        return null;
-    }
-}
-
-if (!leverageFixed || !qtyStr) {
-    log(`❌ ${instId}: Không thể thiết lập đòn bẩy phù hợp hoặc vốn không đủ ký quỹ.`);
-    return null;
-}
 
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
