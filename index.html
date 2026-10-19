@@ -426,77 +426,109 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
   }
 }
 
-// *** HÀM CLOSE ORDER ĐÃ ĐƯỢC CẢI TIẾN ĐỂ XỬ LÝ TP/SL TỰ ĐỘNG CỦA SERVER ***
+/* *** HÀM CLOSE ORDER: CHỈ GHI NHẬN TP/SL ĐÃ ĐÓNG BỞI OKX SERVER *** */
 async function closeOrder(instId, reason) {
-  if (!activeOrders[instId]) return;
+  const order = activeOrders[instId];
+  if (!order || order._closing) return null;
+
+  // Chặn nhiều lần xử lý cùng một lệnh khi WebSocket liên tục báo hit giá
+  order._closing = true;
 
   try {
-    const order = activeOrders[instId];
     let posData = null;
-    let entryPrice = order.price;
-    let posSize = order.quantity;
-    let isManuallyClosed = false;
 
-    // 1. Lấy thông tin position để kiểm tra trạng thái trên OKX
-    const posResult = await okxApiRequest('/account/positions', 'GET', null);
-    posData = posResult?.data?.find(p => p.instId === instId && p.pos !== '0');
-    
+    // 1. KIỂM TRA VỊ THẾ THỰC TẾ TRÊN OKX
+    const posResult = await okxApiRequest(
+      `/account/positions?instType=SWAP&instId=${instId}`,
+      'GET',
+      null
+    );
+
+    if (
+      !posResult ||
+      posResult.code !== '0' ||
+      !Array.isArray(posResult.data)
+    ) {
+      log(`⏳ Chưa xác minh được vị thế ${instId}, giữ nguyên để kiểm tra lại.`);
+      return null;
+    }
+
+    posData = posResult.data.find(
+      p => p.instId === instId && Math.abs(Number(p.pos || 0)) > 0
+    );
+
+    // Vị thế còn mở: tuyệt đối không đóng thủ công
     if (posData) {
-      // Position vẫn mở trên OKX, tiến hành đóng thủ công
-      entryPrice = parseFloat(posData.avgPx);
-      posSize = parseFloat(posData.pos);
-      
-      // 2. Đóng vị thế
-      const result = await okxApiRequest('/trade/close-position', 'POST', { instId });
-
-      if (result && result.code === '0') {
-        isManuallyClosed = true;
-      } else {
-        // Nếu đóng thủ công thất bại (có thể do lỗi mạng, v.v.), BOT không thể xác định
-        log(`❌ Lỗi đóng lệnh thủ công ${instId}: ${result?.msg || 'Unknown error'}`);
-        return null; 
-      }
-    } else {
-      // Position đã đóng trên OKX (do TP/SL server hoặc người dùng).
-      // Chúng ta chỉ cần cập nhật trạng thái nội bộ.
-      log(`🔒 Vị thế ${instId} đã được đóng bởi OKX (TP/SL server) hoặc người dùng.`);
-      // Sử dụng giá entry và size đã lưu trong activeOrders để tính PnL
+      log(`⏳ ${instId} vẫn còn vị thế trên OKX, chờ TP/SL server.`);
+      return null;
     }
-    
-    // --- Cập nhật trạng thái nội bộ (Internal State Update) ---
-    
-    // 3. Tính PnL (Dựa trên giá đóng cửa hiện tại)
-    const currentPrice = positions[instId]?.last || order.price;
-    let pnl = 0;
 
-    if (order.side === 'buy') {
-      pnl = (currentPrice - entryPrice) * posSize;
-    } else {
-      pnl = (entryPrice - currentPrice) * posSize;
+    // 2. LẤY LỊCH SỬ VỊ THẾ ĐÃ ĐÓNG TỪ OKX
+    const historyResult = await okxApiRequest(
+      `/account/positions-history?instType=SWAP&instId=${instId}&limit=10`,
+      'GET',
+      null
+    );
+
+    // Xử lý dữ liệu linh hoạt: Nếu lịch sử trả về chậm, dùng dữ liệu dự phòng từ order để không bị kẹt slot
+    let closedData = null;
+    if (historyResult && historyResult.code === '0' && Array.isArray(historyResult.data) && historyResult.data.length > 0) {
+      closedData = historyResult.data[0];
     }
+
+    const entryPrice = Number(closedData?.openAvgPx || order.price || 0);
+    const posSize = Number(closedData?.closeTotalPos || order.quantity || 0);
+    const currentPrice = Number(closedData?.closeAvgPx || order.tpPrice || order.slPrice || 0);
+
+    const rawPnl = closedData?.realizedPnl !== undefined && closedData?.realizedPnl !== null && closedData?.realizedPnl !== ''
+      ? closedData.realizedPnl
+      : (closedData?.pnl !== undefined && closedData?.pnl !== null && closedData?.pnl !== '' ? closedData.pnl : 0);
     
-    // Cập nhật lịch sử
+    const pnl = Number(rawPnl);
+
+    // 3. PHÂN LOẠI THEO PNL THỰC TẾ HOẶC REASON TRUYỀN VÀO
+    const closeReason = pnl > 0 ? 'tp' : pnl < 0 ? 'sl' : (reason ? reason.toLowerCase() : 'closed');
+
     const closedOrder = {
       ...order,
-      entryPrice: entryPrice,
+      entryPrice,
+      quantity: posSize,
       closePrice: currentPrice,
-      closeTime: Date.now(),
+      closeTime: Number(closedData?.uTime || Date.now()),
       pnl,
-      status: reason.toLowerCase(),
-      reason: isManuallyClosed ? reason : `${reason} (Server)`
+      status: closeReason,
+      reason: `hit ${closeReason.toUpperCase()} (Server PnL)`
     };
-    
+
+    // 4. GHI NHẬN VÀ DỌN DẸP
     orderHistory.push(closedOrder);
     delete activeOrders[instId];
-    log(`🔒 Đã cập nhật trạng thái ${instId} | ${reason} | PnL: ${pnl.toFixed(4)} USDT`);
+
+    log(
+      `🔒 Đã ghi nhận ${instId} | hit ${closeReason.toUpperCase()} (Server PnL) | ` +
+      `Giá đóng: ${currentPrice} | PnL thực tế: ${pnl.toFixed(4)} USDT`
+    );
+
     updateOrderStats();
-    localStorage.setItem('order_history', JSON.stringify(orderHistory));
-    
+
+    localStorage.setItem(
+      'order_history',
+      JSON.stringify(orderHistory)
+    );
+
+    localStorage.setItem(
+      'okx_active_orders',
+      JSON.stringify(activeOrders)
+    );
+
     return closedOrder;
 
   } catch (err) {
     log(`❌ Lỗi khi xử lý đóng lệnh ${instId}: ${err.message}`);
     return null;
+
+  } finally {
+    delete order._closing;
   }
 }
 
