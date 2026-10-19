@@ -406,13 +406,14 @@ async function scanOnce(){
 
     lastCandidates = candidates;
 
+
 /// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP
 for(const c of candidates){
 
   const existing = positions[c.inst];
 
   // Tính toán TP động mới trước
-  let newTp = Number(c.tp);
+  let newTp = c.tp;
   let pnlPct = 0;
 
   if(existing?.hasOrder){
@@ -435,31 +436,39 @@ for(const c of candidates){
       ? (currentPrice - currentTpTarget)
       : (currentTpTarget - currentPrice);
 
-    // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP
-    const profitProgress = totalDistance > 0 && currentEntryPrice > 0
+    // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP (hoặc lời lớn)
+    const profitProgress = totalDistance > 0
       ? (currentSide === 'sell'
           ? (currentEntryPrice - currentPrice) / (currentEntryPrice - currentTpTarget)
           : (currentPrice - currentEntryPrice) / (currentTpTarget - currentEntryPrice))
       : 0;
 
-    if(profitProgress >= 0.8) {
-      // Nới TP thêm 0.3 ATR theo hướng có lợi cho giá
+    if(profitProgress >= 0.8 || pnlPct >= 1) {
+      // Nới TP thêm 0.5 ATR theo hướng có lợi cho giá
       const atrValue = Number(c.atr || existing.atr || (currentEntryPrice * 0.01));
 
       if(currentSide === 'sell'){
-        newTp = Math.min(
-          currentTpTarget,
-          currentTpTarget - (atrValue * 0.3)
-        );
+        const proposedTp = Number(c.tp) - (atrValue * 0.5);
+        newTp = Math.min(Number(existing.tp || c.tp), proposedTp);
       } else {
-        newTp = Math.max(
-          currentTpTarget,
-          currentTpTarget + (atrValue * 0.3)
-        );
+        const proposedTp = Number(c.tp) + (atrValue * 0.5);
+        newTp = Math.max(Number(existing.tp || c.tp), proposedTp);
       }
     } else {
-      // Giữ TP ban đầu khi chưa đạt 80%
-      newTp = currentTpTarget;
+      if(existing?.side === 'sell'){
+        newTp = Math.min(Number(existing.tp || c.tp), Number(c.tp));
+      } else {
+        newTp = Math.max(Number(existing.tp || c.tp), Number(c.tp));
+      }
+    }
+
+    // Không cho TP nằm sai phía so với Entry
+    if(currentEntryPrice > 0){
+      if(currentSide === 'sell' && newTp >= currentEntryPrice){
+        newTp = Number(existing.tp || c.tp);
+      } else if(currentSide !== 'sell' && newTp <= currentEntryPrice){
+        newTp = Number(existing.tp || c.tp);
+      }
     }
   }
 
@@ -480,7 +489,7 @@ for(const c of candidates){
           });
 
           if(amendRes && amendRes.code === '0'){
-            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${Number(newTp).toFixed(6)}`);
+            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${Number(newTp).toFixed(4)}`);
             activeOrders[c.inst].tpPrice = Number(newTp);
           } else {
             log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
@@ -517,6 +526,7 @@ for(const c of candidates){
     activeOrders[c.inst].tpPrice = Number(newTp);
   }
 }
+
 
 
     // 6. XẾP HẠNG PUMP / DUMP
