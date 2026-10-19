@@ -703,6 +703,7 @@ const ctVal = parseFloat(info.ctVal);
 const lotSz = parseFloat(info.lotSz);
 const minSz = parseFloat(info.minSz || lotSz);
 const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
+const pPrec = info.tickSz.includes('.') ? info.tickSz.split('.')[1].length : 0;
 const tickSz = parseFloat(info.tickSz);
 // Kiểm tra giới hạn tối đa 10 vị thế thực tế trên OKX
 const positionsRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
