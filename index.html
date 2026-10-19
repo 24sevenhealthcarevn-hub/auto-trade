@@ -60,7 +60,7 @@ th{color:var(--muted);font-weight:600}
     </div>
     <div class="config-group">
       <span class="config-label">Đòn bẩy:</span>
-      <input type="number" id="leverage" class="config-input" value="50" min="1" max="100">
+      <input type="number" id="leverage" class="config-input" value="20" min="1" max="100">
     </div>
     <div class="config-group">
       <span class="config-label">Kích thước lệnh tối đa (USDT):</span>
@@ -256,473 +256,28 @@ async function safeFetch(url, options = {}){
   return await safeFetch(`${OKX_API_BASE}${endpoint}`, fetchOptions);
 }
 
-
-
-
-// Hàm tính ATR và Price 1h
-async function fetchATR_Price1h(instId){
-  try{
-    const url = `${OKX_CANDLES}?instId=${encodeURIComponent(instId)}&bar=1H&limit=${ATR_BAR_LIMIT + 1}`; 
-    const j = await safeFetch(url);
-    const c = j?.data;
-    
-    if(!c || c.length < ATR_BAR_LIMIT + 1) {
-      return { instId, atr: 0.0001, price1h: null };
-    }
-    
-    const price1h = parseFloat(c[1][4]);
-    
-    const trs = [];
-    for(let i = 1; i < c.length; i++){
-      const h = parseFloat(c[i][2]);
-      const l = parseFloat(c[i][3]);
-      const pc = parseFloat(c[i+1]?.[4] || c[i][4]); 
-      trs.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
-    }
-    const atr = trs.reduce((a, b) => a + b, 0) / trs.length;
-
-    return { 
-      instId, 
-      atr: parseFloat(atr.toFixed(10)), 
-      price1h: price1h
-    };
-  } catch(err){
-    return { instId, atr: 0.0001, price1h: null };
-  }
-}
-
-function calcTP_SL(last, atr, isPump){
-  const tp = isPump ? last + atr * 2 : last - atr * 2;
-  const sl = isPump ? last - atr * 1.5 : last + atr * 1.5;
-  return {
-    tp: parseFloat(tp.toFixed(6)),
-    sl: parseFloat(sl.toFixed(6))
-  };
-}
-
-// Cache lưu nến 1h từ WebSocket OKX (Cập nhật realtime)
-if (typeof price1hCache === 'undefined') {
-    var price1hCache = {};
-}
-
-async function scanOnce(){
-  if(isScanning) return;
-
-  isScanning = true;
-
-  const scanBtn = document.getElementById('scanNow');
-  scanBtn.disabled = true;
-  scanBtn.textContent = '⏳ Đang quét 120 coin...';
-
-  const status = document.getElementById('status');
-  status.textContent = '⏳ Đang lấy Tickers...';
-
-  try{
-    // 1. CHỈ 1 REQUEST REST
-    const j = await safeFetch(OKX_TICKERS);
-
-    if(!j || !j.data){
-      throw new Error('Không lấy được dữ liệu tickers');
-    }
-
-    // 2. LỌC TOÀN BỘ SWAP USDT
-    const rawTickers = (j.data || [])
-      .filter(t =>
-        t.instId.endsWith('-SWAP') &&
-        t.instId.includes('USDT')
-      )
-      .filter(t =>
-        !EXCLUDE_PREFIXES.some(ex =>
-          t.instId.startsWith(ex)
-        )
-      );
-
-    // 3. TÍNH DELTA 1H LOCAL
-    const tickers = rawTickers
-      .map(t => {
-        const last = Number(t.last) || 0;
-        const open1h = price1hCache[t.instId]?.open1h;
-        const open24h = Number(t.open24h);
-        const price1h = open1h || open24h || last;
-
-        const delta =
-          price1h > 0
-            ? ((last - price1h) / price1h) * 100
-            : 0;
-
-        return {
-          ...t,
-          price1h,
-          delta,
-          absDelta: Math.abs(delta)
-        };
-      })
-      .sort((a,b) => b.absDelta - a.absDelta)
-      .slice(0, 120);
-
-    // 4. XỬ LÝ LOCAL 5/120 → 120/120
-    const candidates = [];
-
-    for(let i = 0; i < tickers.length; i += 5){
-
-      const chunk = tickers.slice(i, i + 5);
-
-      for(const t of chunk){
-
-        const inst = t.instId;
-        const base = inst.split('-USDT')[0];
-        const last = Number(t.last);
-
-        // Giữ ATR cũ nếu coin đã tồn tại
-        const atr = positions[inst]?.atr || 0.0001;
-
-        const { tp, sl } =
-          calcTP_SL(last, atr, t.delta > 0);
-
-        candidates.push({
-          inst,
-          base,
-          last,
-          price1h: t.price1h,
-          delta: t.delta,
-          atr,
-          tp,
-          sl,
-          vol24h: Number(t.volCcy24h || 0)
-        });
-      }
-
-      const processedCount =
-        Math.min(i + 5, tickers.length);
-
-      status.textContent =
-        `⏳ Đã quét ${processedCount}/${tickers.length} coin...`;
-
-      scanBtn.textContent =
-        `⏳ Quét ${processedCount}/${tickers.length}`;
-
-      await sleep(20);
-    }
-
-    lastCandidates = candidates;
-
-/// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP
-
-for(const c of candidates){
-
-  const existing = positions[c.inst];
-
-  // Tính toán TP động mới trước
-  let newTp = existing?.tp || c.tp;
-  let pnlPct = 0;
-
-  // Đảm bảo TP luôn nằm đúng hướng có lợi nhuận so với Entry ngay cả khi tắt trailing
-  const currentEntryPrice = Number(existing?.price || existing?.last || c.last);
-  const currentSide = existing?.side || c.side;
-  if(currentEntryPrice > 0){
-    if(currentSide === 'sell' && newTp >= currentEntryPrice){
-      newTp = Number(existing?.tp || c.tp);
-    } else if(currentSide !== 'sell' && newTp <= currentEntryPrice){
-      newTp = Number(existing?.tp || c.tp);
-    }
-  }
-
-  if(false){
-
-    if(existing?.hasOrder){
-      const currentEntryPrice = Number(existing.price || existing.last || c.last);
-      const currentSide = existing.side;
-      const currentTpTarget = Number(existing.tp || c.tp);
-      const currentPrice = Number(c.last);
-
-      // Tính PNL theo biến động giá, chưa nhân đòn bẩy
-      if(currentEntryPrice > 0 && currentPrice > 0){
-        pnlPct = currentSide === 'sell'
-          ? ((currentEntryPrice - currentPrice) / currentEntryPrice) * 100
-          : ((currentPrice - currentEntryPrice) / currentEntryPrice) * 100;
-      }
-
-      // Khoảng cách từ Entry đến TP ban đầu
-      const totalDistance = Math.abs(currentTpTarget - currentEntryPrice);
-      // Khoảng cách hiện tại của giá đến TP
-      const distanceToTp = currentSide === 'sell'
-        ? (currentPrice - currentTpTarget)
-        : (currentTpTarget - currentPrice);
-
-      // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP (hoặc lời lớn)
-      const profitProgress = totalDistance > 0
-        ? (currentSide === 'sell'
-            ? (currentEntryPrice - currentPrice) / (currentEntryPrice - currentTpTarget)
-            : (currentPrice - currentEntryPrice) / (currentTpTarget - currentEntryPrice))
-        : 0;
-
-      if(profitProgress >= 0.8 || pnlPct >= 1) {
-        // Nới TP thêm 0.5 ATR theo hướng có lợi cho giá
-        const atrValue = Number(c.atr || existing.atr || (currentEntryPrice * 0.01));
-
-        if(currentSide === 'sell'){
-          const proposedTp = Number(c.tp) - (atrValue * 0.5);
-          newTp = Math.min(Number(existing.tp || c.tp), proposedTp);
-        } else {
-          const proposedTp = Number(c.tp) + (atrValue * 0.5);
-          newTp = Math.max(Number(existing.tp || c.tp), proposedTp);
-        }
-      } else {
-        if(existing?.side === 'sell'){
-          newTp = Math.min(Number(existing.tp || c.tp), Number(c.tp));
-        } else {
-          newTp = Math.max(Number(existing.tp || c.tp), Number(c.tp));
-        }
-      }
-
-      // Không cho TP nằm sai phía so với Entry
-      if(currentEntryPrice > 0){
-        if(currentSide === 'sell' && newTp >= currentEntryPrice){
-          newTp = Number(existing.tp || c.tp);
-        } else if(currentSide !== 'sell' && newTp <= currentEntryPrice){
-          newTp = Number(existing.tp || c.tp);
-        }
-      }
-    }
-
-    // Gọi API amend TP trực tiếp trên OKX nếu có thay đổi tăng/giảm hợp lệ
-    if(existing?.hasOrder && activeOrders[c.inst]){
-      const currentTp = Number(activeOrders[c.inst].tpPrice || existing.tp || c.tp);
-
-      if(Number(newTp) > 0 && Math.abs(Number(newTp) - currentTp) > 0.000001){
-        const algoId = activeOrders[c.inst].algoId || existing.algoId;
-
-        if(algoId){
-          try {
-            const amendRes = await okxApiRequest('/trade/amend-algo-order', 'POST', {
-              instId: c.inst,
-              algoId: algoId,
-              newTpTriggerPx: Number(newTp).toFixed(6),
-              newTpOrdPx: '-1'
-            });
-
-            if(amendRes && amendRes.code === '0'){
-              log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${Number(newTp).toFixed(4)}`);
-              activeOrders[c.inst].tpPrice = Number(newTp);
-            } else {
-              log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
-            }
-          } catch (err) {
-            log(`❌ [AMEND TP EXCEPTION] ${c.inst}: ${err.message}`);
-          }
-        }
-      }
-    }
-
-  }
-
-  positions[c.inst] = {
-    ...c,
-
-    // Giữ trạng thái cũ
-    status: existing?.status || 'open',
-
-    hitTime: existing?.hitTime || null,
-
-    hasOrder:
-      existing?.hasOrder ||
-      activeOrders[c.inst] !== undefined,
-
-    // TP động: không cho TP tụt xuống
-    tp: newTp,
-
-    algoId: existing?.algoId || activeOrders[c.inst]?.algoId,
-
-    pnlPct: pnlPct
-  };
-
-  // Cập nhật TP đang lưu cho lệnh đang chạy
-  if(false){
-    if(existing?.hasOrder && activeOrders[c.inst]){
-      activeOrders[c.inst].tpPrice = Number(newTp);
-    }
-  }
-}
-
-
-    // 6. XẾP HẠNG PUMP / DUMP
-    const pos = candidates
-      .filter(x => x.delta > 0)
-      .sort((a,b) => b.delta - a.delta);
-
-    const neg = candidates
-      .filter(x => x.delta < 0)
-      .sort((a,b) => a.delta - b.delta);
-
-    // 7. GIỮ TOP 5 — CHỈ THAY KHI SLOT BỊ TP/SL
-    if(!topPump.length && !topDump.length){
-
-      topPump = pos
-        .slice(0, TOP_N)
-        .map(x => x.inst);
-
-      topDump = neg
-        .slice(0, TOP_N)
-        .map(x => x.inst);
-
-    }else{
-
-      // Loại coin đã hit TP/SL
-      topPump = topPump.filter(
-        i => positions[i]?.status === 'open'
-      );
-
-      topDump = topDump.filter(
-        i => positions[i]?.status === 'open'
-      );
-
-      // Bù Pump còn thiếu
-      for(const c of pos){
-
-        if(topPump.length >= TOP_N) break;
-
-        if(
-          !topPump.includes(c.inst) &&
-          positions[c.inst]?.status === 'open'
-        ){
-          topPump.push(c.inst);
-        }
-      }
-
-      // Bù Dump còn thiếu
-      for(const c of neg){
-
-        if(topDump.length >= TOP_N) break;
-
-        if(
-          !topDump.includes(c.inst) &&
-          positions[c.inst]?.status === 'open'
-        ){
-          topDump.push(c.inst);
-        }
-      }
-    }
-
-    // 8. AUTO TRADE CHỈ CHO 10 SLOT
-    if(isTrading){
-
-      const tradePromises = [];
-
-      for(const inst of topPump){
-
-        if(
-          positions[inst]?.status === 'open' &&
-          !positions[inst]?.hasOrder &&
-          !activeOrders[inst]
-        ){
-          tradePromises.push(
-            placeOrder(
-              inst,
-              'buy',
-              positions[inst].last,
-              positions[inst].sl,
-              positions[inst].tp
-            ).then(order => {
-
-              if(order){
-                positions[inst].hasOrder = true;
-              }
-
-            }).catch(err => {
-              log(
-                `Lỗi đặt lệnh buy ${inst}: ${err.message}`
-              );
-            })
-          );
-        }
-      }
-
-      for(const inst of topDump){
-
-        if(
-          positions[inst]?.status === 'open' &&
-          !positions[inst]?.hasOrder &&
-          !activeOrders[inst]
-        ){
-          tradePromises.push(
-            placeOrder(
-              inst,
-              'sell',
-              positions[inst].last,
-              positions[inst].sl,
-              positions[inst].tp
-            ).then(order => {
-
-              if(order){
-                positions[inst].hasOrder = true;
-              }
-
-            }).catch(err => {
-              log(
-                `Lỗi đặt lệnh sell ${inst}: ${err.message}`
-              );
-            })
-          );
-        }
-      }
-
-      await Promise.all(tradePromises);
-    }
-
-    // 9. HIỂN THỊ
-    status.textContent =
-      `✅ ${new Date().toLocaleTimeString()} — ` +
-      `Đã quét ${tickers.length}/120 | ` +
-      `Pump ${topPump.length}/5 | Dump ${topDump.length}/5`;
-
-    document.getElementById('symbolsCount').innerText =
-      `Số cặp: ${Object.keys(positions).length}`;
-
-    renderAll();
-
-    // 10. WS CHỈ SUBSCRIBE TOP 10
-    updateWSSubscriptions();
-
-  }catch(err){
-
-    status.textContent = '❌ Lỗi scan';
-    log('Lỗi scan: ' + err.message);
-
-  }finally{
-
-    isScanning = false;
-    scanBtn.disabled = false;
-    scanBtn.textContent = '🔄 Quét ngay';
-
-    startCountdown();
-  }
-}
-
 // *** HÀM TRADE ĐÃ ĐÍNH KÈM TP/SL LÊN OKX SERVER ***
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
   const capital = parseFloat(document.getElementById('capitalPerTrade').value);
   const leverage = parseInt(document.getElementById('leverage').value);
 
   // 1. KIỂM TRA ĐẦU VÀO (CAPITAL, LEVERAGE, API KEYS)
-if (!capital || capital <= 0) {
-  log("❌ Vốn không hợp lệ");
-  return null;
-}
-if (!leverage || leverage < 1) {
-  log("❌ Đòn bẩy không hợp lệ");
-  return null;
-}
+  if (!capital || capital <= 0) {
+    log("❌ Vốn không hợp lệ");
+    return null;
+  }
+  if (!leverage || leverage < 1) {
+    log("❌ Đòn bẩy không hợp lệ");
+    return null;
+  }
 
-// Bổ sung giá trị API Key trực tiếp tại đây
-const apiKey = '7ffea234-8094-4f4c-91f6-1773d2370b5c';
-
-if (!apiKey) {
-  log('❌ Chưa cấu hình API Keys cho trading');
-  return null;
-}
+  if (!apiKey) {
+    log('❌ Chưa cấu hình API Keys cho trading');
+    return null;
+  }
 
   try {
-   // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
+    // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
     const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
     const info = instRes?.data?.[0];
     if (!info) return null;
@@ -844,187 +399,306 @@ if (!apiKey) {
   }
 }
 
-
-    // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
-const attachAlgoOrds = [
-  {
-    "algoOrdType": "take_profit",
-    "sz": qtyStr,
-    "tpTriggerPx": (Math.round(tpPrice / tickSz) * tickSz).toFixed(pPrec),
-    "tpOrdPx": "-1"
-  },
-  {
-    "algoOrdType": "stop_loss",
-    "sz": qtyStr,
-    "slTriggerPx": (Math.round(slPrice / tickSz) * tickSz).toFixed(pPrec),
-    "slOrdPx": "-1"
-  }
-];
-
-// 4. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
-const orderResult = await okxApiRequest('/trade/order', 'POST', {
-  instId,
-  tdMode: 'cross',
-  side,
-  ordType: 'market',
-  sz: qtyStr,
-  posSide: side === 'buy' ? 'long' : 'short',
-  attachAlgoOrds: attachAlgoOrds
-});
-
-if (orderResult && orderResult.code === '0') {
-  const orderId = orderResult.data[0].ordId;
-  const quantity = parseFloat(qtyStr);
-  const notional = quantity * price * ctVal;
-  const margin = notional / currentLeverage;
-
-  log(
-    `✅ Đã đặt lệnh ${side} ${qtyStr} ${instId} | ` +
-    `SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)} ` +
-    `(Vị thế ~${notional.toFixed(2)} USDT, ` +
-    `Ký quỹ ~${margin.toFixed(2)} USDT, Lev ${currentLeverage}x)`
-  );
-
-  const orderInfo = {
-    id: orderId,
-    instId,
-    side,
-    price,
-    quantity,
-    ctVal, // <-- Bổ sung dòng này để lưu hệ số hợp đồng
-    slPrice,
-    tpPrice,
-    capital,
-    leverage: currentLeverage,
-    margin,
-    notional,
-    timestamp: Date.now(),
-    status: 'open'
-  };
-
-  activeOrders[instId] = orderInfo;
-  return orderInfo;
-} else {
-  log(`❌ Lỗi đặt lệnh cho ${instId}: ${orderResult?.msg || 'Unknown error'}`);
-  return null;
-}
-} catch (err) {
-    log(`❌ Lỗi khi đặt lệnh ${instId}: ${err.message}`);
-    return null;
-  }
-}
-
-
- 
-
-/* *** HÀM CLOSE ORDER: CHỈ GHI NHẬN TP/SL ĐÃ ĐÓNG BỞI OKX SERVER *** */
+// *** HÀM CLOSE ORDER ĐÃ ĐƯỢC CẢI TIẾN ĐỂ XỬ LÝ TP/SL TỰ ĐỘNG CỦA SERVER ***
 async function closeOrder(instId, reason) {
-  const order = activeOrders[instId];
-  if (!order || order._closing) return null;
-
-  // Chặn nhiều lần xử lý cùng một lệnh khi WebSocket liên tục báo hit giá
-  order._closing = true;
+  if (!activeOrders[instId]) return;
 
   try {
+    const order = activeOrders[instId];
     let posData = null;
+    let entryPrice = order.price;
+    let posSize = order.quantity;
+    let isManuallyClosed = false;
 
-    // 1. KIỂM TRA VỊ THẾ THỰC TẾ TRÊN OKX
-    const posResult = await okxApiRequest(
-      `/account/positions?instType=SWAP&instId=${instId}`,
-      'GET',
-      null
-    );
-
-    if (
-      !posResult ||
-      posResult.code !== '0' ||
-      !Array.isArray(posResult.data)
-    ) {
-      log(`⏳ Chưa xác minh được vị thế ${instId}, giữ nguyên để kiểm tra lại.`);
-      return null;
-    }
-
-    posData = posResult.data.find(
-      p => p.instId === instId && Math.abs(Number(p.pos || 0)) > 0
-    );
-
-    // Vị thế còn mở: tuyệt đối không đóng thủ công
-    if (posData) {
-      log(`⏳ ${instId} vẫn còn vị thế trên OKX, chờ TP/SL server.`);
-      return null;
-    }
-
-    // 2. LẤY LỊCH SỬ VỊ THẾ ĐÃ ĐÓNG TỪ OKX
-    const historyResult = await okxApiRequest(
-      `/account/positions-history?instType=SWAP&instId=${instId}&limit=10`,
-      'GET',
-      null
-    );
-
-    // Xử lý dữ liệu linh hoạt: Nếu lịch sử trả về chậm, dùng dữ liệu dự phòng từ order để không bị kẹt slot
-    let closedData = null;
-    if (historyResult && historyResult.code === '0' && Array.isArray(historyResult.data) && historyResult.data.length > 0) {
-      closedData = historyResult.data[0];
-    }
-
-    const entryPrice = Number(closedData?.openAvgPx || order.price || 0);
-    const posSize = Number(closedData?.closeTotalPos || order.quantity || 0);
-    const currentPrice = Number(closedData?.closeAvgPx || order.tpPrice || order.slPrice || 0);
-
-    const rawPnl = closedData?.realizedPnl !== undefined && closedData?.realizedPnl !== null && closedData?.realizedPnl !== ''
-      ? closedData.realizedPnl
-      : (closedData?.pnl !== undefined && closedData?.pnl !== null && closedData?.pnl !== '' ? closedData.pnl : 0);
+    // 1. Lấy thông tin position để kiểm tra trạng thái trên OKX
+    const posResult = await okxApiRequest('/account/positions', 'GET', null);
+    posData = posResult?.data?.find(p => p.instId === instId && p.pos !== '0');
     
-    const pnl = Number(rawPnl);
+    if (posData) {
+      // Position vẫn mở trên OKX, tiến hành đóng thủ công
+      entryPrice = parseFloat(posData.avgPx);
+      posSize = parseFloat(posData.pos);
+      
+      // 2. Đóng vị thế
+      const result = await okxApiRequest('/trade/close-position', 'POST', { instId });
 
-    // 3. PHÂN LOẠI THEO PNL THỰC TẾ HOẶC REASON TRUYỀN VÀO
-    const closeReason = pnl > 0 ? 'tp' : pnl < 0 ? 'sl' : (reason ? reason.toLowerCase() : 'closed');
+      if (result && result.code === '0') {
+        isManuallyClosed = true;
+      } else {
+        // Nếu đóng thủ công thất bại (có thể do lỗi mạng, v.v.), BOT không thể xác định
+        log(`❌ Lỗi đóng lệnh thủ công ${instId}: ${result?.msg || 'Unknown error'}`);
+        return null; 
+      }
+    } else {
+      // Position đã đóng trên OKX (do TP/SL server hoặc người dùng).
+      // Chúng ta chỉ cần cập nhật trạng thái nội bộ.
+      log(`🔒 Vị thế ${instId} đã được đóng bởi OKX (TP/SL server) hoặc người dùng.`);
+      // Sử dụng giá entry và size đã lưu trong activeOrders để tính PnL
+    }
+    
+    // --- Cập nhật trạng thái nội bộ (Internal State Update) ---
+    
+    // 3. Tính PnL (Dựa trên giá đóng cửa hiện tại)
+    const currentPrice = positions[instId]?.last || order.price;
+    let pnl = 0;
 
+    if (order.side === 'buy') {
+      pnl = (currentPrice - entryPrice) * posSize;
+    } else {
+      pnl = (entryPrice - currentPrice) * posSize;
+    }
+    
+    // Cập nhật lịch sử
     const closedOrder = {
       ...order,
-      entryPrice,
-      quantity: posSize,
+      entryPrice: entryPrice,
       closePrice: currentPrice,
-      closeTime: Number(closedData?.uTime || Date.now()),
+      closeTime: Date.now(),
       pnl,
-      status: closeReason,
-      reason: `hit ${closeReason.toUpperCase()} (Server PnL)`
+      status: reason.toLowerCase(),
+      reason: isManuallyClosed ? reason : `${reason} (Server)`
     };
-
-    // 4. GHI NHẬN VÀ DỌN DẸP
+    
     orderHistory.push(closedOrder);
     delete activeOrders[instId];
-
-    log(
-      `🔒 Đã ghi nhận ${instId} | hit ${closeReason.toUpperCase()} (Server PnL) | ` +
-      `Giá đóng: ${currentPrice} | PnL thực tế: ${pnl.toFixed(4)} USDT`
-    );
-
+    log(`🔒 Đã cập nhật trạng thái ${instId} | ${reason} | PnL: ${pnl.toFixed(4)} USDT`);
     updateOrderStats();
-
-    localStorage.setItem(
-      'order_history',
-      JSON.stringify(orderHistory)
-    );
-
-    localStorage.setItem(
-      'okx_active_orders',
-      JSON.stringify(activeOrders)
-    );
-
+    localStorage.setItem('order_history', JSON.stringify(orderHistory));
+    
     return closedOrder;
 
   } catch (err) {
     log(`❌ Lỗi khi xử lý đóng lệnh ${instId}: ${err.message}`);
     return null;
-
-  } finally {
-    delete order._closing;
   }
 }
 
+// Hàm tính ATR và Price 1h
+async function fetchATR_Price1h(instId){
+  try{
+    const url = `${OKX_CANDLES}?instId=${encodeURIComponent(instId)}&bar=1H&limit=${ATR_BAR_LIMIT + 1}`; 
+    const j = await safeFetch(url);
+    const c = j?.data;
+    
+    if(!c || c.length < ATR_BAR_LIMIT + 1) {
+      return { instId, atr: 0.0001, price1h: null };
+    }
+    
+    const price1h = parseFloat(c[1][4]);
+    
+    const trs = [];
+    for(let i = 1; i < c.length; i++){
+      const h = parseFloat(c[i][2]);
+      const l = parseFloat(c[i][3]);
+      const pc = parseFloat(c[i+1]?.[4] || c[i][4]); 
+      trs.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
+    }
+    const atr = trs.reduce((a, b) => a + b, 0) / trs.length;
 
+    return { 
+      instId, 
+      atr: parseFloat(atr.toFixed(10)), 
+      price1h: price1h
+    };
+  } catch(err){
+    return { instId, atr: 0.0001, price1h: null };
+  }
+}
 
+function calcTP_SL(last, atr, isPump){
+  const tp = isPump ? last + atr * 2 : last - atr * 2;
+  const sl = isPump ? last - atr * 1.5 : last + atr * 1.5;
+  return {
+    tp: parseFloat(tp.toFixed(6)),
+    sl: parseFloat(sl.toFixed(6))
+  };
+}
+
+// Cache lưu nến 1h từ WebSocket OKX (Cập nhật realtime)
+if (typeof price1hCache === 'undefined') {
+    var price1hCache = {};
+}
+
+async function scanOnce(){
+  if(isScanning) return;
+  
+  isScanning = true;
+  const scanBtn = document.getElementById('scanNow');
+  scanBtn.disabled = true;
+  scanBtn.textContent = '⏳ Lấy Tickers & Cache WS...';
+  
+  const status = document.getElementById('status');
+  status.textContent = '⏳ Đang quét dữ liệu...';
+
+  let tickers;
+  try{
+    const j = await safeFetch(OKX_TICKERS);
+    if(!j || !j.data){
+      throw new Error('Không lấy được dữ liệu tickers');
+    }
+
+    // BƯỚC 1: Lấy toàn bộ danh sách SWAP USDT (loại trừ các prefix không giao dịch)
+    const rawTickers = (j.data || [])
+      .filter(t => t.instId.endsWith('-SWAP') && t.instId.includes('USDT'))
+      .filter(t => !EXCLUDE_PREFIXES.some(ex => t.instId.startsWith(ex)));
+
+    // BƯỚC 2: TÍNH Δ1H TRỰC TIẾP TỪ WEBSOCKET CACHE (FALLBACK ĐẠT Δ24H NẾU CHƯA CÓ CACHE)
+    tickers = rawTickers
+      .map(t => {
+        const last = Number(t.last) || 0;
+        // Ưu tiên 1: Giá Open1h từ WebSocket Candle1H Cache (Đúng Δ1h thật 100%)
+        // Ưu tiên 2: Fallback về open24h nếu WS chưa kịp nạp Cache
+        const open1h = price1hCache[t.instId]?.open1h;
+        const open24h = Number(t.open24h);
+        const refPrice = open1h || open24h || last;
+
+        const delta1h = refPrice > 0 ? ((last - refPrice) / refPrice) * 100 : 0;
+        const absDelta1h = Math.abs(delta1h);
+
+        return { 
+          ...t, 
+          price1h: refPrice, 
+          delta1h, 
+          absDelta1h 
+        };
+      })
+      .sort((a, b) => b.absDelta1h - a.absDelta1h)
+      .slice(0, Math.min(CANDIDATE_LIMIT || 30, 30)); // Giới hạn tối đa 30 coin để chặn triệt để 429
+
+    // BƯỚC 3: CHỈ NẾU CẦN LẤY ATR BỔ SUNG CHO CÁC COIN CHƯA CÓ TRONG CACHE REST
+    scanBtn.textContent = `⏳ Tính ATR/Price 1h cho ${tickers.length} cặp (Song song có giới hạn)...`;
+    status.textContent = `⏳ Tính toán ATR/Price 1h (Song song có giới hạn)...`;
+    
+    const chunks = [];
+    for (let i = 0; i < tickers.length; i += CONCURRENCY_LIMIT) {
+        chunks.push(tickers.slice(i, i + CONCURRENCY_LIMIT));
+    }
+
+    let allResults = [];
+    let processedCount = 0;
+    
+    for (const chunk of chunks) {
+        const fetchPromises = chunk.map(t => fetchATR_Price1h(t.instId));
+        const chunkResults = await Promise.all(fetchPromises);
+        allResults = allResults.concat(chunkResults);
+        processedCount += chunk.length;
+        status.textContent = `⏳ Đã xử lý ${processedCount}/${tickers.length} cặp... (Chờ 500ms)`;
+        
+        if (processedCount < tickers.length) {
+            await sleep(500); 
+        }
+    }
+
+    const atrPriceMap = {};
+    allResults.forEach(r => {
+        if(r && r.instId) {
+            atrPriceMap[r.instId] = r;
+        }
+    });
+    
+    const candidates = [];
+    for(const t of tickers){
+      const inst = t.instId;
+      const base = inst.split('-USDT')[0];
+      const last = Number(t.last);
+      
+      const { atr, price1h } = atrPriceMap[inst] || { atr: 0.0001, price1h: null }; 
+      
+      const delta = price1h ? (last - price1h) / price1h * 100 : 0;
+      const {tp, sl} = calcTP_SL(last, atr, delta > 0);
+      
+      candidates.push({
+        inst, base, last, price1h, delta, atr, tp, sl, 
+        vol24h: Number(t.volCcy24h || 0)
+      });
+    }
+
+    lastCandidates = candidates;
+    
+    // Cập nhật positions
+    for(const c of candidates){
+      const existing = positions[c.inst];
+      positions[c.inst] = {
+        ...c, 
+        status: existing?.status || 'open',
+        hitTime: existing?.hitTime || null,
+        hasOrder: existing?.hasOrder || activeOrders[c.inst] !== undefined
+      };
+    }
+
+    const pos = candidates.filter(x => x.delta > 0).sort((a, b) => b.delta - a.delta);
+    const neg = candidates.filter(x => x.delta < 0).sort((a, b) => a.delta - b.delta);
+
+    // Xử lý Top lists
+    if(!topPump.length && !topDump.length){
+      topPump = pos.slice(0, TOP_N).map(x => x.inst);
+      topDump = neg.slice(0, TOP_N).map(x => x.inst);
+    } else {
+      topPump = topPump.filter(i => positions[i]?.status === 'open');
+      topDump = topDump.filter(i => positions[i]?.status === 'open');
+      
+      for(const c of pos){
+        if(topPump.length >= TOP_N) break;
+        if(!topPump.includes(c.inst) && positions[c.inst]?.status === 'open') {
+          topPump.push(c.inst);
+        }
+      }
+      
+      for(const c of neg){
+        if(topDump.length >= TOP_N) break;
+        if(!topDump.includes(c.inst) && positions[c.inst]?.status === 'open') {
+          topDump.push(c.inst);
+        }
+      }
+    }
+
+    // Auto trade: Đặt lệnh cho các position mới (Song song)
+    if (isTrading) {
+      const tradePromises = [];
+
+      for (const inst of topPump) {
+        if (positions[inst]?.status === 'open' && !positions[inst]?.hasOrder && !activeOrders[inst]) {
+          tradePromises.push(
+            placeOrder(inst, 'buy', positions[inst].last, positions[inst].sl, positions[inst].tp)
+              .then(order => {
+                if (order) positions[inst].hasOrder = true;
+              })
+              .catch(err => log(`Lỗi đặt lệnh buy ${inst} (song song): ${err.message}`)) 
+          );
+        }
+      }
+      
+      for (const inst of topDump) {
+        if (positions[inst]?.status === 'open' && !positions[inst]?.hasOrder && !activeOrders[inst]) {
+          tradePromises.push(
+            placeOrder(inst, 'sell', positions[inst].last, positions[inst].sl, positions[inst].tp)
+              .then(order => {
+                if (order) positions[inst].hasOrder = true;
+              })
+              .catch(err => log(`Lỗi đặt lệnh sell ${inst} (song song): ${err.message}`))
+          );
+        }
+      }
+
+      await Promise.all(tradePromises); 
+    }
+
+    status.textContent = `✅ Cập nhật: ${new Date().toLocaleTimeString()} — ${Object.keys(positions).length} cặp`;
+    document.getElementById('symbolsCount').innerText = `Số cặp: ${Object.keys(positions).length}`;
+    
+    renderAll();
+    updateWSSubscriptions(); 
+    
+  } catch(err){
+    status.textContent = '❌ Lỗi scan';
+    log('Lỗi scan: ' + err.message);
+  } finally {
+    isScanning = false;
+    scanBtn.disabled = false;
+    scanBtn.textContent = '🔄 Quét ngay';
+    startCountdown();
+  }
+}
 
 function renderAll(){
   renderTop('pumpTable', topPump);
@@ -1277,22 +951,18 @@ async function handleHit(inst, wasPump, reason){
   let replacementCandidate = null;
   
   if(wasPump){
-  replacementCandidate = pool.find(c =>
-    c.delta > 0 &&
-    !topPump.includes(c.inst) &&
-    !topDump.includes(c.inst) &&
-    (!positions[c.inst] || positions[c.inst].status === 'open') &&
-    !activeOrders[c.inst]
-  );
-} else {
-  replacementCandidate = pool.find(c =>
-    c.delta < 0 &&
-    !topDump.includes(c.inst) &&
-    !topPump.includes(c.inst) &&
-    (!positions[c.inst] || positions[c.inst].status === 'open') &&
-    !activeOrders[c.inst]
-  );
-}
+    replacementCandidate = pool.find(c => 
+      c.delta > 0 && 
+      !topPump.includes(c.inst) && 
+      (!positions[c.inst] || positions[c.inst].status === 'open')
+    );
+  } else {
+    replacementCandidate = pool.find(c => 
+      c.delta < 0 && 
+      !topDump.includes(c.inst) && 
+      (!positions[c.inst] || positions[c.inst].status === 'open')
+    );
+  }
 
   if(replacementCandidate){
     const {tp, sl} = calcTP_SL(replacementCandidate.last, replacementCandidate.atr, replacementCandidate.delta > 0);
