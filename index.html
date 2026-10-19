@@ -256,6 +256,16 @@ async function safeFetch(url, options = {}){
   return await safeFetch(`${OKX_API_BASE}${endpoint}`, fetchOptions);
 }
 
+async function okxPublic(endpoint) {
+    try {
+        const res = await safeFetch(`${OKX_API_BASE}${endpoint}`);
+        return res;
+    } catch (error) {
+        log(`❌ Lỗi gọi API public ${endpoint}: ${error.message}`);
+        return null;
+    }
+}
+  
 // *** HÀM TRADE ĐÃ ĐÍNH KÈM TP/SL LÊN OKX SERVER ***
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
   const capital = parseFloat(document.getElementById('capitalPerTrade').value);
