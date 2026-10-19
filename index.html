@@ -729,7 +729,7 @@ if (openPositions.some(p => p.instId === instId)) {
 let currentLeverage = leverage;
 let qtyStr = "";
 let leverageFixed = false;
-
+let calcMargin = 0;
 // Hạ đòn bẩy theo các mốc giống LOOP vào lệnh, ký quỹ bằng vốn nhập trên giao diện
 while (currentLeverage >= 1) {
     let rawQty = capital / (price * ctVal);
