@@ -406,62 +406,82 @@ async function scanOnce(){
 
     lastCandidates = candidates;
 
-if (true) {
-    /// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP 
-for(const c of candidates){ 
- 
-  const existing = positions[c.inst]; 
- 
+/// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP
+for(const c of candidates){
+
+  const existing = positions[c.inst];
+
   // Tính toán TP động mới trước
-  let newTp = c.tp;
+  let newTp = Number(c.tp);
+  let pnlPct = 0;
+
   if(existing?.hasOrder){
-    const currentEntryPrice = existing.price || existing.last || c.last;
+    const currentEntryPrice = Number(existing.price || existing.last || c.last);
     const currentSide = existing.side;
-    const currentTpTarget = existing.tp || c.tp;
-    
+    const currentTpTarget = Number(existing.tp || c.tp);
+    const currentPrice = Number(c.last);
+
+    // Tính PNL theo biến động giá, chưa nhân đòn bẩy
+    if(currentEntryPrice > 0 && currentPrice > 0){
+      pnlPct = currentSide === 'sell'
+        ? ((currentEntryPrice - currentPrice) / currentEntryPrice) * 100
+        : ((currentPrice - currentEntryPrice) / currentEntryPrice) * 100;
+    }
+
     // Khoảng cách từ Entry đến TP ban đầu
     const totalDistance = Math.abs(currentTpTarget - currentEntryPrice);
     // Khoảng cách hiện tại của giá đến TP
-    const currentPrice = c.last;
-    const distanceToTp = currentSide === 'sell' ? (currentPrice - currentTpTarget) : (currentTpTarget - currentPrice);
-    
-    // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP (hoặc lời lớn)
-    const profitProgress = currentSide === 'sell' 
-      ? (currentEntryPrice - currentPrice) / (currentEntryPrice - currentTpTarget)
-      : (currentPrice - currentEntryPrice) / (currentTpTarget - currentEntryPrice);
+    const distanceToTp = currentSide === 'sell'
+      ? (currentPrice - currentTpTarget)
+      : (currentTpTarget - currentPrice);
+
+    // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP
+    const profitProgress = totalDistance > 0 && currentEntryPrice > 0
+      ? (currentSide === 'sell'
+          ? (currentEntryPrice - currentPrice) / (currentEntryPrice - currentTpTarget)
+          : (currentPrice - currentEntryPrice) / (currentTpTarget - currentEntryPrice))
+      : 0;
 
     if(profitProgress >= 0.8) {
-      // Nới TP thêm 0.5 ATR theo hướng có lợi cho giá
-      const atrValue = c.atr || existing.atr || (currentEntryPrice * 0.01);
+      // Nới TP thêm 0.3 ATR theo hướng có lợi cho giá
+      const atrValue = Number(c.atr || existing.atr || (currentEntryPrice * 0.01));
+
       if(currentSide === 'sell'){
-        newTp = Math.min(existing.tp || c.tp, c.tp - (atrValue * 0.5));
+        newTp = Math.min(
+          currentTpTarget,
+          currentTpTarget - (atrValue * 0.3)
+        );
       } else {
-        newTp = Math.max(existing.tp || c.tp, c.tp + (atrValue * 0.5));
+        newTp = Math.max(
+          currentTpTarget,
+          currentTpTarget + (atrValue * 0.3)
+        );
       }
     } else {
-      if(existing?.side === 'sell'){
-        newTp = Math.min(existing.tp || c.tp, c.tp);
-      } else {
-        newTp = Math.max(existing.tp || c.tp, c.tp);
-      }
+      // Giữ TP ban đầu khi chưa đạt 80%
+      newTp = currentTpTarget;
     }
   }
 
   // Gọi API amend TP trực tiếp trên OKX nếu có thay đổi tăng/giảm hợp lệ
   if(existing?.hasOrder && activeOrders[c.inst]){
-    const currentTp = activeOrders[c.inst].tpPrice || existing.tp || c.tp;
-    if(newTp !== currentTp){
+    const currentTp = Number(activeOrders[c.inst].tpPrice || existing.tp || c.tp);
+
+    if(Number(newTp) > 0 && Math.abs(Number(newTp) - currentTp) > 0.000001){
       const algoId = activeOrders[c.inst].algoId || existing.algoId;
+
       if(algoId){
         try {
           const amendRes = await okxApiRequest('/trade/amend-algo-order', 'POST', {
             instId: c.inst,
             algoId: algoId,
-            newTpTriggerPx: newTp.toFixed(6),
+            newTpTriggerPx: Number(newTp).toFixed(6),
             newTpOrdPx: '-1'
           });
+
           if(amendRes && amendRes.code === '0'){
-            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${newTp.toFixed(4)}`);
+            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${Number(newTp).toFixed(6)}`);
+            activeOrders[c.inst].tpPrice = Number(newTp);
           } else {
             log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
           }
@@ -472,42 +492,32 @@ for(const c of candidates){
     }
   }
 
-  positions[c.inst] = { 
-    ...c, 
- 
-    // Giữ trạng thái cũ 
-    status: existing?.status || 'open', 
- 
-    hitTime: existing?.hitTime || null, 
- 
-    hasOrder: 
-      existing?.hasOrder || 
-      activeOrders[c.inst] !== undefined, 
- 
-    // TP động: không cho TP tụt xuống 
+  positions[c.inst] = {
+    ...c,
+
+    // Giữ trạng thái cũ
+    status: existing?.status || 'open',
+
+    hitTime: existing?.hitTime || null,
+
+    hasOrder:
+      existing?.hasOrder ||
+      activeOrders[c.inst] !== undefined,
+
+    // TP động: không cho TP tụt xuống
     tp: newTp,
 
-    algoId: existing?.algoId || activeOrders[c.inst]?.algoId
-  }; 
- 
+    algoId: existing?.algoId || activeOrders[c.inst]?.algoId,
+
+    pnlPct: pnlPct
+  };
+
   // Cập nhật TP đang lưu cho lệnh đang chạy
   if(existing?.hasOrder && activeOrders[c.inst]){
-    if(existing.side === 'sell'){
-      activeOrders[c.inst].tpPrice =
-        Math.min(
-          activeOrders[c.inst].tpPrice || c.tp,
-          c.tp
-        );
-    }else{
-      activeOrders[c.inst].tpPrice =
-        Math.max(
-          activeOrders[c.inst].tpPrice || c.tp,
-          c.tp
-        );
-    }
+    activeOrders[c.inst].tpPrice = Number(newTp);
   }
 }
-}
+
 
     // 6. XẾP HẠNG PUMP / DUMP
     const pos = candidates
