@@ -416,6 +416,17 @@ for(const c of candidates){
   let newTp = existing?.tp || c.tp;
   let pnlPct = 0;
 
+  // Đảm bảo TP luôn nằm đúng hướng có lợi nhuận so với Entry ngay cả khi tắt trailing
+  const currentEntryPrice = Number(existing?.price || existing?.last || c.last);
+  const currentSide = existing?.side || c.side;
+  if(currentEntryPrice > 0){
+    if(currentSide === 'sell' && newTp >= currentEntryPrice){
+      newTp = Number(existing?.tp || c.tp);
+    } else if(currentSide !== 'sell' && newTp <= currentEntryPrice){
+      newTp = Number(existing?.tp || c.tp);
+    }
+  }
+
   if(false){
 
     if(existing?.hasOrder){
@@ -532,7 +543,6 @@ for(const c of candidates){
     }
   }
 }
-
 
 
     // 6. XẾP HẠNG PUMP / DUMP
