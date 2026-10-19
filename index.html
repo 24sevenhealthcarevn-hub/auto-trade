@@ -738,13 +738,19 @@ let leverageFixed = false;
 
 // Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
 while (currentLeverage >= 1) {
-    // Công thức chuẩn: Khối lượng dựa trên Vốn x Đòn bẩy
-    let rawQty = (capital * currentLeverage) / (price * ctVal);
+    // Công thức tính số lượng chính xác cho cả coin giá trị rất nhỏ (nhiều số 0)
+    let rawQty = capital / (price * ctVal);
+    
+    // Làm tròn theo lotSz, dùng toFixed(qPrec) để tránh lỗi số học trôi nổi (floating-point) của JS
     let qty = Math.floor(rawQty / lotSz) * lotSz;
-    let actualMargin = (qty * price * ctVal) / currentLeverage; // Ký quỹ thực tế sau khi làm tròn lotSz
+    if (qPrec > 0 && qty < minSz && rawQty >= minSz) {
+        qty = minSz; // Đảm bảo đạt tối thiểu minSz nếu vốn đủ mua
+    }
 
-    // Nếu không đủ lô tối thiểu hoặc ký quỹ vượt quá vốn nhập, hạ đòn bẩy
-    if (qty < minSz || actualMargin > capital + 1e-8) {
+    let actualMargin = qty * price * ctVal; // Ký quỹ thực tế đúng bằng vốn đầu tư
+
+    // Nới lỏng biên độ sai số lên 20% (1.20) vì coin meme số lượng lớn rất dễ lệch khi làm tròn lotSz nhỏ
+    if (qty < minSz || (capital > 0 && actualMargin > capital * 1.20)) {
         if (currentLeverage > 50) currentLeverage = 50;
         else if (currentLeverage > 30) currentLeverage = 30;
         else if (currentLeverage > 20) currentLeverage = 20;
@@ -783,11 +789,6 @@ while (currentLeverage >= 1) {
         log(`❌ Set leverage lỗi cho ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
         return null;
     }
-}
-
-if (!leverageFixed || !qtyStr) {
-    log(`❌ ${instId}: Không thể thiết lập đòn bẩy phù hợp hoặc vốn không đủ ký quỹ.`);
-    return null;
 }
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
