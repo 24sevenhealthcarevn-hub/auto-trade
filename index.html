@@ -764,31 +764,43 @@ let qtyStr = "";
 let leverageFixed = false;
 
 // Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
-while (currentLeverage >= 1) {
-    // Công thức chuẩn: Vị thế = Vốn (Ký quỹ) x Đòn bẩy
-    let rawQty = (capital * currentLeverage) / (price * ctVal);
-    let qty = Math.floor(rawQty / lotSz) * lotSz;
 
-    // Xử lý riêng cho Coin Meme/Giá cực nhỏ: Nếu đủ vốn mua minSz thì lấy minSz
+while (currentLeverage >= 1) {
+    // Kiểm tra dữ liệu hợp đồng và giá
+    if (!Number.isFinite(price) || price <= 0 ||
+        !Number.isFinite(ctVal) || ctVal <= 0 ||
+        !Number.isFinite(lotSz) || lotSz <= 0 ||
+        !Number.isFinite(minSz) || minSz <= 0) {
+        log(`❌ ${instId}: Dữ liệu price/ctVal/lotSz/minSz không hợp lệ.`);
+        return null;
+    }
+
+    // Tính khối lượng theo vốn giao diện và đòn bẩy hiện tại
+    let rawQty = (capital * currentLeverage) / (price * ctVal);
+    let qty = Math.floor((rawQty + 1e-10) / lotSz) * lotSz;
+
+    // Làm tròn theo độ chính xác của lotSz
+    qty = Number(qty.toFixed(qPrec));
+
+    // Chỉ nâng lên minSz nếu vốn vẫn đủ ký quỹ
     if (qty < minSz && rawQty >= minSz) {
         qty = minSz;
     }
 
-    // Ký quỹ thực tế sau khi tính khối lượng hợp đồng
     let actualMargin = (qty * price * ctVal) / currentLeverage;
 
-    // Nếu không đủ lô tối thiểu thì hạ đòn bẩy
+    // Không đủ khối lượng tối thiểu: hạ đòn bẩy không giải quyết được
     if (qty < minSz) {
-        if (currentLeverage > 50) currentLeverage = 50;
-        else if (currentLeverage > 30) currentLeverage = 30;
-        else if (currentLeverage > 20) currentLeverage = 20;
-        else if (currentLeverage > 10) currentLeverage = 10;
-        else if (currentLeverage > 5) currentLeverage = 5;
-        else if (currentLeverage > 3) currentLeverage = 3;
-        else if (currentLeverage > 2) currentLeverage = 2;
-        else if (currentLeverage > 1) currentLeverage = 1;
-        else break;
-        continue;
+        log(`❌ ${instId}: Vốn ${capital} USDT không đủ minSz ở ${currentLeverage}x.`);
+        return null;
+    }
+
+    // Không cho phép ký quỹ vượt vốn nhập
+    if (!Number.isFinite(actualMargin) ||
+        actualMargin <= 0 ||
+        actualMargin > capital + 1e-8) {
+        log(`❌ ${instId}: Ký quỹ ${actualMargin} vượt vốn ${capital} USDT.`);
+        return null;
     }
 
     const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
@@ -798,12 +810,12 @@ while (currentLeverage >= 1) {
         posSide: String(side).toLowerCase() === 'buy' ? 'long' : 'short'
     });
 
-    if (levRes?.code === '0' || levRes?.code === '32115') {
+    if (levRes?.code === '0') {
         qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
         leverageFixed = true;
         break;
     } else if (levRes?.code === '59102') {
-        // Lỗi vượt hạn mức đòn bẩy của OKX -> Hạ mốc đòn bẩy xuống tiếp
+        // OKX giới hạn đòn bẩy -> hạ xuống mức tiếp theo
         if (currentLeverage > 50) currentLeverage = 50;
         else if (currentLeverage > 30) currentLeverage = 30;
         else if (currentLeverage > 20) currentLeverage = 20;
@@ -823,6 +835,7 @@ if (!leverageFixed || !qtyStr) {
     log(`❌ ${instId}: Không thể thiết lập đòn bẩy phù hợp hoặc vốn không đủ ký quỹ.`);
     return null;
 }
+
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
 const attachAlgoOrds = [
