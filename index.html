@@ -777,8 +777,8 @@ while (currentLeverage >= 1) {
     // Ký quỹ thực tế sau khi tính khối lượng hợp đồng
     let actualMargin = (qty * price * ctVal) / currentLeverage;
 
-    // Nếu không đủ lô tối thiểu hoặc ký quỹ vượt vốn quá 10% (do sai số làm tròn lotSz), hạ đòn bẩy
-    if (qty < minSz || actualMargin > capital * 1.10) {
+    // Nếu không đủ lô tối thiểu thì hạ đòn bẩy
+    if (qty < minSz) {
         if (currentLeverage > 50) currentLeverage = 50;
         else if (currentLeverage > 30) currentLeverage = 30;
         else if (currentLeverage > 20) currentLeverage = 20;
