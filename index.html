@@ -747,20 +747,22 @@ let qtyStr = "";
 let leverageFixed = false;
 
 // Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
+// Hạ đòn bẩy dần, đảm bảo Ký quỹ (Margin) đúng bằng Vốn nhập (capital)
 while (currentLeverage >= 1) {
-    // Công thức tính số lượng chính xác cho cả coin giá trị rất nhỏ (nhiều số 0)
-    let rawQty = capital / (price * ctVal);
-    
-    // Làm tròn theo lotSz, dùng toFixed(qPrec) để tránh lỗi số học trôi nổi (floating-point) của JS
+    // Công thức chuẩn: Vị thế = Vốn (Ký quỹ) x Đòn bẩy
+    let rawQty = (capital * currentLeverage) / (price * ctVal);
     let qty = Math.floor(rawQty / lotSz) * lotSz;
-    if (qPrec > 0 && qty < minSz && rawQty >= minSz) {
-        qty = minSz; // Đảm bảo đạt tối thiểu minSz nếu vốn đủ mua
+
+    // Xử lý riêng cho Coin Meme/Giá cực nhỏ: Nếu đủ vốn mua minSz thì lấy minSz
+    if (qty < minSz && rawQty >= minSz) {
+        qty = minSz;
     }
 
-    let actualMargin = qty * price * ctVal; // Ký quỹ thực tế đúng bằng vốn đầu tư
+    // Ký quỹ thực tế sau khi tính khối lượng hợp đồng
+    let actualMargin = (qty * price * ctVal) / currentLeverage;
 
-    // Nới lỏng biên độ sai số lên 20% (1.20) vì coin meme số lượng lớn rất dễ lệch khi làm tròn lotSz nhỏ
-    if (qty < minSz || (capital > 0 && actualMargin > capital * 1.20)) {
+    // Nếu không đủ lô tối thiểu hoặc ký quỹ vượt vốn quá 10% (do sai số làm tròn lotSz), hạ đòn bẩy
+    if (qty < minSz || actualMargin > capital * 1.10) {
         if (currentLeverage > 50) currentLeverage = 50;
         else if (currentLeverage > 30) currentLeverage = 30;
         else if (currentLeverage > 20) currentLeverage = 20;
