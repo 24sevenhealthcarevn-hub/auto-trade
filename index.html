@@ -256,6 +256,412 @@ async function safeFetch(url, options = {}){
   return await safeFetch(`${OKX_API_BASE}${endpoint}`, fetchOptions);
 }
 
+
+
+
+// Hàm tính ATR và Price 1h
+async function fetchATR_Price1h(instId){
+  try{
+    const url = `${OKX_CANDLES}?instId=${encodeURIComponent(instId)}&bar=1H&limit=${ATR_BAR_LIMIT + 1}`; 
+    const j = await safeFetch(url);
+    const c = j?.data;
+    
+    if(!c || c.length < ATR_BAR_LIMIT + 1) {
+      return { instId, atr: 0.0001, price1h: null };
+    }
+    
+    const price1h = parseFloat(c[1][4]);
+    
+    const trs = [];
+    for(let i = 1; i < c.length; i++){
+      const h = parseFloat(c[i][2]);
+      const l = parseFloat(c[i][3]);
+      const pc = parseFloat(c[i+1]?.[4] || c[i][4]); 
+      trs.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
+    }
+    const atr = trs.reduce((a, b) => a + b, 0) / trs.length;
+
+    return { 
+      instId, 
+      atr: parseFloat(atr.toFixed(10)), 
+      price1h: price1h
+    };
+  } catch(err){
+    return { instId, atr: 0.0001, price1h: null };
+  }
+}
+
+function calcTP_SL(last, atr, isPump){
+  const tp = isPump ? last + atr * 2 : last - atr * 2;
+  const sl = isPump ? last - atr * 1.5 : last + atr * 1.5;
+  return {
+    tp: parseFloat(tp.toFixed(6)),
+    sl: parseFloat(sl.toFixed(6))
+  };
+}
+
+// Cache lưu nến 1h từ WebSocket OKX (Cập nhật realtime)
+if (typeof price1hCache === 'undefined') {
+    var price1hCache = {};
+}
+
+async function scanOnce(){
+  if(isScanning) return;
+
+  isScanning = true;
+
+  const scanBtn = document.getElementById('scanNow');
+  scanBtn.disabled = true;
+  scanBtn.textContent = '⏳ Đang quét 120 coin...';
+
+  const status = document.getElementById('status');
+  status.textContent = '⏳ Đang lấy Tickers...';
+
+  try{
+    // 1. CHỈ 1 REQUEST REST
+    const j = await safeFetch(OKX_TICKERS);
+
+    if(!j || !j.data){
+      throw new Error('Không lấy được dữ liệu tickers');
+    }
+
+    // 2. LỌC TOÀN BỘ SWAP USDT
+    const rawTickers = (j.data || [])
+      .filter(t =>
+        t.instId.endsWith('-SWAP') &&
+        t.instId.includes('USDT')
+      )
+      .filter(t =>
+        !EXCLUDE_PREFIXES.some(ex =>
+          t.instId.startsWith(ex)
+        )
+      );
+
+    // 3. TÍNH DELTA 1H LOCAL
+    const tickers = rawTickers
+      .map(t => {
+        const last = Number(t.last) || 0;
+        const open1h = price1hCache[t.instId]?.open1h;
+        const open24h = Number(t.open24h);
+        const price1h = open1h || open24h || last;
+
+        const delta =
+          price1h > 0
+            ? ((last - price1h) / price1h) * 100
+            : 0;
+
+        return {
+          ...t,
+          price1h,
+          delta,
+          absDelta: Math.abs(delta)
+        };
+      })
+      .sort((a,b) => b.absDelta - a.absDelta)
+      .slice(0, 120);
+
+    // 4. XỬ LÝ LOCAL 5/120 → 120/120
+    const candidates = [];
+
+    for(let i = 0; i < tickers.length; i += 5){
+
+      const chunk = tickers.slice(i, i + 5);
+
+      for(const t of chunk){
+
+        const inst = t.instId;
+        const base = inst.split('-USDT')[0];
+        const last = Number(t.last);
+
+        // Giữ ATR cũ nếu coin đã tồn tại
+        const atr = positions[inst]?.atr || 0.0001;
+
+        const { tp, sl } =
+          calcTP_SL(last, atr, t.delta > 0);
+
+        candidates.push({
+          inst,
+          base,
+          last,
+          price1h: t.price1h,
+          delta: t.delta,
+          atr,
+          tp,
+          sl,
+          vol24h: Number(t.volCcy24h || 0)
+        });
+      }
+
+      const processedCount =
+        Math.min(i + 5, tickers.length);
+
+      status.textContent =
+        `⏳ Đã quét ${processedCount}/${tickers.length} coin...`;
+
+      scanBtn.textContent =
+        `⏳ Quét ${processedCount}/${tickers.length}`;
+
+      await sleep(20);
+    }
+
+    lastCandidates = candidates;
+
+if (true) {
+    /// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP 
+for(const c of candidates){ 
+ 
+  const existing = positions[c.inst]; 
+ 
+  // Tính toán TP động mới trước
+  let newTp = c.tp;
+  if(existing?.hasOrder){
+    const currentEntryPrice = existing.price || existing.last || c.last;
+    const currentSide = existing.side;
+    const currentTpTarget = existing.tp || c.tp;
+    
+    // Khoảng cách từ Entry đến TP ban đầu
+    const totalDistance = Math.abs(currentTpTarget - currentEntryPrice);
+    // Khoảng cách hiện tại của giá đến TP
+    const currentPrice = c.last;
+    const distanceToTp = currentSide === 'sell' ? (currentPrice - currentTpTarget) : (currentTpTarget - currentPrice);
+    
+    // Kiểm tra điều kiện: Nếu giá đã đi được 80% quãng đường tới TP (hoặc lời lớn)
+    const profitProgress = currentSide === 'sell' 
+      ? (currentEntryPrice - currentPrice) / (currentEntryPrice - currentTpTarget)
+      : (currentPrice - currentEntryPrice) / (currentTpTarget - currentEntryPrice);
+
+    if(profitProgress >= 0.8) {
+      // Nới TP thêm 0.5 ATR theo hướng có lợi cho giá
+      const atrValue = c.atr || existing.atr || (currentEntryPrice * 0.01);
+      if(currentSide === 'sell'){
+        newTp = Math.min(existing.tp || c.tp, c.tp - (atrValue * 0.5));
+      } else {
+        newTp = Math.max(existing.tp || c.tp, c.tp + (atrValue * 0.5));
+      }
+    } else {
+      if(existing?.side === 'sell'){
+        newTp = Math.min(existing.tp || c.tp, c.tp);
+      } else {
+        newTp = Math.max(existing.tp || c.tp, c.tp);
+      }
+    }
+  }
+
+  // Gọi API amend TP trực tiếp trên OKX nếu có thay đổi tăng/giảm hợp lệ
+  if(existing?.hasOrder && activeOrders[c.inst]){
+    const currentTp = activeOrders[c.inst].tpPrice || existing.tp || c.tp;
+    if(newTp !== currentTp){
+      const algoId = activeOrders[c.inst].algoId || existing.algoId;
+      if(algoId){
+        try {
+          const amendRes = await okxApiRequest('/trade/amend-algo-order', 'POST', {
+            instId: c.inst,
+            algoId: algoId,
+            newTpTriggerPx: newTp.toFixed(6),
+            newTpOrdPx: '-1'
+          });
+          if(amendRes && amendRes.code === '0'){
+            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${newTp.toFixed(4)}`);
+          } else {
+            log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
+          }
+        } catch (err) {
+          log(`❌ [AMEND TP EXCEPTION] ${c.inst}: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  positions[c.inst] = { 
+    ...c, 
+ 
+    // Giữ trạng thái cũ 
+    status: existing?.status || 'open', 
+ 
+    hitTime: existing?.hitTime || null, 
+ 
+    hasOrder: 
+      existing?.hasOrder || 
+      activeOrders[c.inst] !== undefined, 
+ 
+    // TP động: không cho TP tụt xuống 
+    tp: newTp,
+
+    algoId: existing?.algoId || activeOrders[c.inst]?.algoId
+  }; 
+ 
+  // Cập nhật TP đang lưu cho lệnh đang chạy
+  if(existing?.hasOrder && activeOrders[c.inst]){
+    if(existing.side === 'sell'){
+      activeOrders[c.inst].tpPrice =
+        Math.min(
+          activeOrders[c.inst].tpPrice || c.tp,
+          c.tp
+        );
+    }else{
+      activeOrders[c.inst].tpPrice =
+        Math.max(
+          activeOrders[c.inst].tpPrice || c.tp,
+          c.tp
+        );
+    }
+  }
+}
+}
+
+    // 6. XẾP HẠNG PUMP / DUMP
+    const pos = candidates
+      .filter(x => x.delta > 0)
+      .sort((a,b) => b.delta - a.delta);
+
+    const neg = candidates
+      .filter(x => x.delta < 0)
+      .sort((a,b) => a.delta - b.delta);
+
+    // 7. GIỮ TOP 5 — CHỈ THAY KHI SLOT BỊ TP/SL
+    if(!topPump.length && !topDump.length){
+
+      topPump = pos
+        .slice(0, TOP_N)
+        .map(x => x.inst);
+
+      topDump = neg
+        .slice(0, TOP_N)
+        .map(x => x.inst);
+
+    }else{
+
+      // Loại coin đã hit TP/SL
+      topPump = topPump.filter(
+        i => positions[i]?.status === 'open'
+      );
+
+      topDump = topDump.filter(
+        i => positions[i]?.status === 'open'
+      );
+
+      // Bù Pump còn thiếu
+      for(const c of pos){
+
+        if(topPump.length >= TOP_N) break;
+
+        if(
+          !topPump.includes(c.inst) &&
+          positions[c.inst]?.status === 'open'
+        ){
+          topPump.push(c.inst);
+        }
+      }
+
+      // Bù Dump còn thiếu
+      for(const c of neg){
+
+        if(topDump.length >= TOP_N) break;
+
+        if(
+          !topDump.includes(c.inst) &&
+          positions[c.inst]?.status === 'open'
+        ){
+          topDump.push(c.inst);
+        }
+      }
+    }
+
+    // 8. AUTO TRADE CHỈ CHO 10 SLOT
+    if(isTrading){
+
+      const tradePromises = [];
+
+      for(const inst of topPump){
+
+        if(
+          positions[inst]?.status === 'open' &&
+          !positions[inst]?.hasOrder &&
+          !activeOrders[inst]
+        ){
+          tradePromises.push(
+            placeOrder(
+              inst,
+              'buy',
+              positions[inst].last,
+              positions[inst].sl,
+              positions[inst].tp
+            ).then(order => {
+
+              if(order){
+                positions[inst].hasOrder = true;
+              }
+
+            }).catch(err => {
+              log(
+                `Lỗi đặt lệnh buy ${inst}: ${err.message}`
+              );
+            })
+          );
+        }
+      }
+
+      for(const inst of topDump){
+
+        if(
+          positions[inst]?.status === 'open' &&
+          !positions[inst]?.hasOrder &&
+          !activeOrders[inst]
+        ){
+          tradePromises.push(
+            placeOrder(
+              inst,
+              'sell',
+              positions[inst].last,
+              positions[inst].sl,
+              positions[inst].tp
+            ).then(order => {
+
+              if(order){
+                positions[inst].hasOrder = true;
+              }
+
+            }).catch(err => {
+              log(
+                `Lỗi đặt lệnh sell ${inst}: ${err.message}`
+              );
+            })
+          );
+        }
+      }
+
+      await Promise.all(tradePromises);
+    }
+
+    // 9. HIỂN THỊ
+    status.textContent =
+      `✅ ${new Date().toLocaleTimeString()} — ` +
+      `Đã quét ${tickers.length}/120 | ` +
+      `Pump ${topPump.length}/5 | Dump ${topDump.length}/5`;
+
+    document.getElementById('symbolsCount').innerText =
+      `Số cặp: ${Object.keys(positions).length}`;
+
+    renderAll();
+
+    // 10. WS CHỈ SUBSCRIBE TOP 10
+    updateWSSubscriptions();
+
+  }catch(err){
+
+    status.textContent = '❌ Lỗi scan';
+    log('Lỗi scan: ' + err.message);
+
+  }finally{
+
+    isScanning = false;
+    scanBtn.disabled = false;
+    scanBtn.textContent = '🔄 Quét ngay';
+
+    startCountdown();
+  }
+}
+
 // *** HÀM TRADE ĐÃ ĐÍNH KÈM TP/SL LÊN OKX SERVER ***
 async function placeOrder(instId, side, price, slPrice, tpPrice) {
   const capital = parseFloat(document.getElementById('capitalPerTrade').value);
@@ -324,13 +730,11 @@ let currentLeverage = leverage;
 let qtyStr = "";
 let leverageFixed = false;
 
-// Hạ đòn bẩy theo các mốc giống LOOP vào lệnh
+// Hạ đòn bẩy theo các mốc giống LOOP vào lệnh, ký quỹ bằng vốn nhập trên giao diện
 while (currentLeverage >= 1) {
-    let rawQty = (capital * currentLeverage) / (price * ctVal);
+    let rawQty = capital / (price * ctVal);
     let qty = Math.floor(rawQty / lotSz) * lotSz;
-
-    // Bảo đảm khối lượng đạt tối thiểu và ký quỹ không vượt vốn mục tiêu
-    let calcMargin = (qty * price * ctVal) / currentLeverage;
+    let actualMargin = (qty * price * ctVal) / currentLeverage;
 
     if (qty < minSz || calcMargin > capital + 1e-8) {
         if (currentLeverage > 50) currentLeverage = 50;
@@ -567,402 +971,6 @@ async function closeOrder(instId, reason) {
 
 
 
-
-// Hàm tính ATR và Price 1h
-async function fetchATR_Price1h(instId){
-  try{
-    const url = `${OKX_CANDLES}?instId=${encodeURIComponent(instId)}&bar=1H&limit=${ATR_BAR_LIMIT + 1}`; 
-    const j = await safeFetch(url);
-    const c = j?.data;
-    
-    if(!c || c.length < ATR_BAR_LIMIT + 1) {
-      return { instId, atr: 0.0001, price1h: null };
-    }
-    
-    const price1h = parseFloat(c[1][4]);
-    
-    const trs = [];
-    for(let i = 1; i < c.length; i++){
-      const h = parseFloat(c[i][2]);
-      const l = parseFloat(c[i][3]);
-      const pc = parseFloat(c[i+1]?.[4] || c[i][4]); 
-      trs.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
-    }
-    const atr = trs.reduce((a, b) => a + b, 0) / trs.length;
-
-    return { 
-      instId, 
-      atr: parseFloat(atr.toFixed(10)), 
-      price1h: price1h
-    };
-  } catch(err){
-    return { instId, atr: 0.0001, price1h: null };
-  }
-}
-
-function calcTP_SL(last, atr, isPump){
-  const tp = isPump ? last + atr * 2 : last - atr * 2;
-  const sl = isPump ? last - atr * 1.5 : last + atr * 1.5;
-  return {
-    tp: parseFloat(tp.toFixed(6)),
-    sl: parseFloat(sl.toFixed(6))
-  };
-}
-
-// Cache lưu nến 1h từ WebSocket OKX (Cập nhật realtime)
-if (typeof price1hCache === 'undefined') {
-    var price1hCache = {};
-}
-
-async function scanOnce(){
-  if(isScanning) return;
-
-  isScanning = true;
-
-  const scanBtn = document.getElementById('scanNow');
-  scanBtn.disabled = true;
-  scanBtn.textContent = '⏳ Đang quét 120 coin...';
-
-  const status = document.getElementById('status');
-  status.textContent = '⏳ Đang lấy Tickers...';
-
-  try{
-    // KHÔI PHỤC VỊ THẾ ĐANG MỞ TRÊN OKX
-    const positionsRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
-
-    if (positionsRes?.code === '0') {
-      const openPositions = (positionsRes.data || [])
-        .filter(p => Math.abs(Number(p.pos || 0)) > 0);
-
-      const savedOrders = JSON.parse(localStorage.getItem('okx_active_orders') || '{}');
-      Object.assign(activeOrders, savedOrders);
-
-      for (const p of openPositions) {
-        const inst = p.instId;
-        const side = p.posSide === 'long' ? 'buy'
-          : p.posSide === 'short' ? 'sell'
-          : Number(p.pos) > 0 ? 'buy' : 'sell';
-
-        positions[inst] = {
-          ...(positions[inst] || {}),
-          inst,
-          base: inst.split('-USDT')[0],
-          last: Number(p.last || p.markPx || p.avgPx),
-          price1h: Number(p.avgPx),
-          delta: 0,
-          atr: Number(p.avgPx) * 0.01,
-          tp: Number(activeOrders[inst]?.tpPrice || 0),
-          sl: Number(activeOrders[inst]?.slPrice || 0),
-          side,
-          status: positions[inst]?.status || 'open',
-          hasOrder: true
-        };
-      }
-
-      log(`♻️ Đã tải ${openPositions.length} vị thế đang mở từ OKX.`);
-    } else {
-      throw new Error('Không thể tải vị thế đang mở từ OKX');
-    }
-
-    // 1. CHỈ 1 REQUEST REST
-    const j = await safeFetch(OKX_TICKERS);
-
-    if(!j || !j.data){
-      throw new Error('Không lấy được dữ liệu tickers');
-    }
-
-    // 2. LỌC TOÀN BỘ SWAP USDT
-    const rawTickers = (j.data || [])
-      .filter(t =>
-        t.instId.endsWith('-SWAP') &&
-        t.instId.includes('USDT')
-      )
-      .filter(t =>
-        !EXCLUDE_PREFIXES.some(ex =>
-          t.instId.startsWith(ex)
-        )
-      );
-
-    // 3. TÍNH DELTA 1H LOCAL
-    const tickers = rawTickers
-      .map(t => {
-        const last = Number(t.last) || 0;
-        const open1h = price1hCache[t.instId]?.open1h;
-        const open24h = Number(t.open24h);
-        const price1h = open1h || open24h || last;
-
-        const delta =
-          price1h > 0
-            ? ((last - price1h) / price1h) * 100
-            : 0;
-
-        return {
-          ...t,
-          price1h,
-          delta,
-          absDelta: Math.abs(delta)
-        };
-      })
-      .sort((a,b) => b.absDelta - a.absDelta)
-      .slice(0, 120);
-
-    // 4. XỬ LÝ LOCAL 5/120 → 120/120
-    const candidates = [];
-
-    for(let i = 0; i < tickers.length; i += 5){
-
-      const chunk = tickers.slice(i, i + 5);
-
-      for(const t of chunk){
-
-        const inst = t.instId;
-        const base = inst.split('-USDT')[0];
-        const last = Number(t.last);
-
-        // Giữ ATR cũ nếu coin đã tồn tại
-        const atr = Number(positions[inst]?.atr) > 0
-          ? Number(positions[inst].atr)
-          : last * 0.01;
-
-        const { tp, sl } =
-          calcTP_SL(last, atr, t.delta > 0);
-
-        candidates.push({
-          inst,
-          base,
-          last,
-          price1h: t.price1h,
-          delta: t.delta,
-          atr,
-          tp,
-          sl,
-          vol24h: Number(t.volCcy24h || 0)
-        });
-      }
-
-      const processedCount =
-        Math.min(i + 5, tickers.length);
-
-      status.textContent =
-        `⏳ Đã quét ${processedCount}/${tickers.length} coin...`;
-
-      scanBtn.textContent =
-        `⏳ Quét ${processedCount}/${tickers.length}`;
-
-      await sleep(20);
-    }
-
-    lastCandidates = candidates;
-
-    /// 5. CẬP NHẬT POSITIONS — GIỮ TP ĐANG CHẠY, CHỈ NÂNG TP 
-for(const c of candidates){ 
- 
-  const existing = positions[c.inst]; 
- 
-  // Tính toán TP động mới trước
-  let newTp = c.tp;
-  if(existing?.hasOrder){
-    if((existing?.side || activeOrders[c.inst]?.side) === 'sell'){
-      newTp = Math.min(existing.tp || c.tp, c.tp);
-    } else {
-      newTp = Math.max(existing.tp || c.tp, c.tp);
-    }
-  }
-
-  // Gọi API amend TP trực tiếp trên OKX nếu có thay đổi tăng/giảm hợp lệ
-  if(existing?.hasOrder && activeOrders[c.inst]){
-    const currentTp = activeOrders[c.inst].tpPrice || existing.tp || c.tp;
-    if(newTp !== currentTp){
-      const algoId = activeOrders[c.inst].algoId || existing.algoId;
-      if(algoId){
-        try {
-          const amendRes = await okxApiRequest('/trade/amend-algo-order', 'POST', {
-            instId: c.inst,
-            algoId: algoId,
-            newTpTriggerPx: newTp.toFixed(6),
-            newTpOrdPx: '-1'
-          });
-          if(amendRes && amendRes.code === '0'){
-            log(`📈 [AMEND TP] ${c.inst}: Cập nhật TP thành công lên ${newTp.toFixed(4)}`);
-          } else {
-            log(`❌ [AMEND TP LỖI] ${c.inst}: ${amendRes?.msg || 'Unknown'}`);
-          }
-        } catch (err) {
-          log(`❌ [AMEND TP EXCEPTION] ${c.inst}: ${err.message}`);
-        }
-      }
-    }
-  }
-
-  positions[c.inst] = { 
-    ...c, 
- 
-    // Giữ trạng thái cũ 
-    status: existing?.status || 'open', 
- 
-    hitTime: existing?.hitTime || null, 
- 
-    hasOrder: 
-      existing?.hasOrder || 
-      activeOrders[c.inst] !== undefined, 
- 
-    // TP động: không cho TP tụt xuống 
-    tp: newTp,
-
-    algoId: existing?.algoId || activeOrders[c.inst]?.algoId
-  }; 
- 
-  // Cập nhật TP đang lưu cho lệnh đang chạy
-  if(existing?.hasOrder && activeOrders[c.inst]){
-    if(existing.side === 'sell'){
-      activeOrders[c.inst].tpPrice =
-        Math.min(
-          activeOrders[c.inst].tpPrice || c.tp,
-          c.tp
-        );
-    }else{
-      activeOrders[c.inst].tpPrice =
-        Math.max(
-          activeOrders[c.inst].tpPrice || c.tp,
-          c.tp
-        );
-    }
-  }
-}
-
-    // 6. XẾP HẠNG PUMP / DUMP
-    const pos = candidates
-      .filter(x => x.delta > 0)
-      .sort((a,b) => b.delta - a.delta);
-
-    const neg = candidates
-      .filter(x => x.delta < 0)
-      .sort((a,b) => a.delta - b.delta);
-
-    // 7. GIỮ TOP 5 — CHỈ THAY KHI SLOT BỊ TP/SL
-    if(!topPump.length && !topDump.length){
-
-      topPump = pos
-        .slice(0, TOP_N)
-        .map(x => x.inst);
-
-      topDump = neg
-        .slice(0, TOP_N)
-        .map(x => x.inst);
-
-    }else{
-
-      // Loại coin đã hit TP/SL
-      topPump = topPump.filter(
-        i => positions[i]?.status === 'open'
-      );
-
-      topDump = topDump.filter(
-        i => positions[i]?.status === 'open'
-      );
-
-      // Bù Pump còn thiếu
-      for(const c of pos){
-
-        if(topPump.length >= TOP_N) break;
-
-        if(
-          !topPump.includes(c.inst) &&
-          positions[c.inst]?.status === 'open'
-        ){
-          topPump.push(c.inst);
-        }
-      }
-
-      // Bù Dump còn thiếu
-      for(const c of neg){
-
-        if(topDump.length >= TOP_N) break;
-
-        if(
-          !topDump.includes(c.inst) &&
-          positions[c.inst]?.status === 'open'
-        ){
-          topDump.push(c.inst);
-        }
-      }
-    }
-
-    
-    
-    // 8. AUTO TRADE CHỈ CHO 10 SLOT// Thay thế đoạn 8 trong scanOnce bằng đoạn kiểm tra trực quan sau:
-if(isTrading){
-  const tradePromises = [];
-  const slotRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
-
-  if(slotRes?.code === '0'){
-    // Lấy danh sách instId đang thực sự có vị thế mở trên sàn OKX
-    const activeInstsOnOKX = new Set(
-      (slotRes.data || [])
-        .filter(p => Math.abs(Number(p.pos || 0)) > 0)
-        .map(p => p.instId)
-    );
-
-    let openSlotCount = activeInstsOnOKX.size;
-
-    // Duyệt Top Pump & Dump để bù đủ 10 slot
-    const allTargets = [...topPump, ...topDump];
-    for(const inst of allTargets){
-      if(openSlotCount >= 10) break;
-
-      // Nếu trên sàn CHƯA có vị thế này và trạng thái là open thì vào lệnh ngay
-      if(!activeInstsOnOKX.has(inst) && positions[inst]?.status === 'open'){
-        openSlotCount++;
-        const side = topPump.includes(inst) ? 'buy' : 'sell';
-
-        tradePromises.push(
-          placeOrder(inst, side, positions[inst].last, positions[inst].sl, positions[inst].tp)
-            .then(order => {
-              if(order) {
-                positions[inst].hasOrder = true;
-                activeOrders[inst] = order;
-              } else {
-                openSlotCount--;
-              }
-            })
-            .catch(() => { openSlotCount--; })
-        );
-      }
-    }
-    await Promise.all(tradePromises);
-  }
-}
-
-
-
-    // 9. HIỂN THỊ
-    status.textContent =
-      `✅ ${new Date().toLocaleTimeString()} — ` +
-      `Đã quét ${tickers.length}/120 | ` +
-      `Pump ${topPump.length}/5 | Dump ${topDump.length}/5`;
-
-    document.getElementById('symbolsCount').innerText =
-      `Số cặp: ${Object.keys(positions).length}`;
-
-    renderAll();
-
-    // 10. WS CHỈ SUBSCRIBE TOP 10
-    updateWSSubscriptions();
-
-  }catch(err){
-
-    status.textContent = '❌ Lỗi scan';
-    log('Lỗi scan: ' + err.message);
-
-  }finally{
-
-    isScanning = false;
-    scanBtn.disabled = false;
-    scanBtn.textContent = '🔄 Quét ngay';
-
-    startCountdown();
-  }
-}
 
 function renderAll(){
   renderTop('pumpTable', topPump);
