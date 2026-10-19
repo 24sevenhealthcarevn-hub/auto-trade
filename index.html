@@ -725,89 +725,124 @@ if (!apiKey) {
    // 2. LẤY THÔNG TIN CẶP TRADE VÀ LOGIC TỰ ĐỘNG HẠ ĐÒN BẨY KHI BỊ GIỚI HẠN OKX
     const instRes = await okxPublic(`/public/instruments?instType=SWAP&instId=${instId}`);
     const info = instRes?.data?.[0];
-    if (!info) {
-        log(`❌ ${instId}: Không lấy được thông tin hợp đồng.`);
-        return null;
-    }
+    if (!info) return null;
 
     const ctVal = parseFloat(info.ctVal);
     const lotSz = parseFloat(info.lotSz);
     const minSz = parseFloat(info.minSz || lotSz);
     const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
-    if (!Number.isFinite(price) || price <= 0 ||
-        !Number.isFinite(capital) || capital <= 0 ||
-        !Number.isFinite(ctVal) || ctVal <= 0 ||
-        !Number.isFinite(lotSz) || lotSz <= 0 ||
-        !Number.isFinite(minSz) || minSz <= 0) {
-        log(`❌ ${instId}: Giá, vốn hoặc thông số hợp đồng không hợp lệ.`);
-        return null;
-    }
-
-    let currentLeverage = Math.min(50, Math.max(1, Math.floor(Number(leverage) || 1)));
+    let currentLeverage = leverage;
     let qtyStr = "";
     let leverageFixed = false;
 
-    while (currentLeverage >= 1) {
-        // Vốn giao diện là ký quỹ mục tiêu: Giá trị vị thế = vốn × đòn bẩy
-        let rawQty = (capital * currentLeverage) / (price * ctVal);
-        let qty = Math.floor((rawQty + 1e-10) / lotSz) * lotSz;
-        qty = Number(qty.toFixed(qPrec));
-
-        if (qty < minSz) {
-            log(`❌ ${instId}: Khối lượng ${qty} thấp hơn minSz ${minSz} ở ${currentLeverage}x; vốn không đủ.`);
-            return null;
-        }
-
-        let actualMargin = (qty * price * ctVal) / currentLeverage;
-
-        // Không vượt vốn nhập; sai lệch do lotSz cần xử lý bằng cách giảm qty một lô
-        while (qty >= minSz && actualMargin > capital + 1e-8) {
-            qty = Number((qty - lotSz).toFixed(qPrec));
-            if (qty < minSz) break;
-            actualMargin = (qty * price * ctVal) / currentLeverage;
-        }
-
-        if (qty < minSz || !Number.isFinite(actualMargin) || actualMargin <= 0 ||
-            actualMargin > capital + 1e-8) {
-            log(`❌ ${instId}: Không tìm được khối lượng hợp lệ trong vốn ${capital} USDT.`);
-            return null;
-        }
-
+    while (currentLeverage >= 10) {
         const levRes = await okxApiRequest('/account/set-leverage', 'POST', {
             instId,
             lever: currentLeverage.toString(),
             mgnMode: 'cross'
         });
 
-        if (levRes?.code === '0') {
+        if (levRes?.code === '0' || levRes?.code === '32115') {
+
+            let rawQty = (capital * currentLeverage) / (price * ctVal);
+
+            let qty = Math.floor(rawQty / lotSz) * lotSz;
+
+            if (qty < minSz) {
+                log(`⚠️ ${instId}: Vốn ${capital} USDT không đủ để mở vị thế tối thiểu.`);
+                return null;
+            }
+
             qtyStr = qPrec > 0 ? qty.toFixed(qPrec) : String(Math.round(qty));
             leverageFixed = true;
-            log(`✅ ${instId}: ${currentLeverage}x | Vốn mục tiêu: ${capital} USDT | Ký quỹ dự kiến: ${actualMargin.toFixed(4)} USDT`);
             break;
+
         } else if (levRes?.code === '59102') {
-            // OKX giới hạn đòn bẩy -> hạ xuống mức tiếp theo
+
             if (currentLeverage > 50) currentLeverage = 50;
             else if (currentLeverage > 30) currentLeverage = 30;
             else if (currentLeverage > 20) currentLeverage = 20;
             else if (currentLeverage > 10) currentLeverage = 10;
-            else if (currentLeverage > 5) currentLeverage = 5;
-            else if (currentLeverage > 3) currentLeverage = 3;
-            else if (currentLeverage > 2) currentLeverage = 2;
-            else if (currentLeverage > 1) currentLeverage = 1;
             else break;
 
             log(`🔄 ${instId}: Hạ đòn bẩy xuống ${currentLeverage}x`);
+
         } else {
-            log(`❌ Set leverage lỗi ${instId}: ${levRes?.code} ${levRes?.msg || ''}`);
+            log(`❌ Set leverage lỗi: ${levRes?.code} ${levRes?.msg || ''}`);
             return null;
         }
     }
 
-    if (!leverageFixed || !qtyStr) {
-        log(`❌ ${instId}: Không thiết lập được đòn bẩy phù hợp.`);
-        return null;
+    if (!leverageFixed) return null;
+
+    // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
+    const attachAlgoOrds = [
+        {
+            "algoOrdType": "take_profit",
+            "sz": qtyStr,
+            "tpTriggerPx": tpPrice.toFixed(6), // Giá kích hoạt TP
+            "tpOrdPx": "-1" // Đóng bằng Market Order khi kích hoạt
+        },
+        {
+            "algoOrdType": "stop_loss",
+            "sz": qtyStr,
+            "slTriggerPx": slPrice.toFixed(6), // Giá kích hoạt SL
+            "slOrdPx": "-1" // Đóng bằng Market Order khi kích hoạt
+        }
+    ];
+
+    // 4. ĐẶT LỆNH CHÍNH (MARKET ORDER) KÈM TP/SL
+    const orderResult = await okxApiRequest('/trade/order', 'POST', {
+      instId,
+      tdMode: 'cross',             
+      side,
+      ordType: 'market',
+      sz: qtyStr,     
+      posSide: side === 'buy' ? 'long' : 'short',
+      attachAlgoOrds: attachAlgoOrds 
+    });
+
+    if (orderResult && orderResult.code === '0') {
+      const orderId = orderResult.data[0].ordId;
+      const quantity = parseFloat(qtyStr);
+      const notional = quantity * price * ctVal;
+      const margin = notional / currentLeverage;
+
+      log(
+        `✅ Đã đặt lệnh ${side} ${qtyStr} ${instId} | ` +
+        `SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)} ` +
+        `(Vị thế ~${notional.toFixed(2)} USDT, ` +
+        `Ký quỹ ~${margin.toFixed(2)} USDT, Lev ${currentLeverage}x)`
+      );
+      
+      const orderInfo = {
+        id: orderId,
+        instId,
+        side,
+        price, 
+        quantity,
+        slPrice,
+        tpPrice,
+        capital,
+        leverage: currentLeverage,
+        margin,
+        notional,
+        timestamp: Date.now(),
+        status: 'open'
+      };
+      
+      activeOrders[instId] = orderInfo;
+      return orderInfo;
+    } else {
+      log(`❌ Lỗi đặt lệnh cho ${instId}: ${orderResult?.msg || 'Unknown error'}`);
+      return null;
     }
+  } catch (err) {
+    log(`❌ Lỗi khi đặt lệnh ${instId}: ${err.message}`);
+    return null;
+  }
+}
 
 
     // 3. TẠO LỆNH TP/SL ĐÍNH KÈM (ATTACH ALGO ORDS)
