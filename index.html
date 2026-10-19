@@ -297,6 +297,23 @@ async function placeOrder(instId, side, price, slPrice, tpPrice) {
     const minSz = parseFloat(info.minSz || lotSz);
     const qPrec = info.lotSz.includes('.') ? info.lotSz.split('.')[1].length : 0;
 
+    // Kiểm tra giới hạn tối đa 10 vị thế thực tế trên OKX
+    const positionsRes = await okxApiRequest('/account/positions?instType=SWAP', 'GET');
+    if (positionsRes?.code !== '0') {
+      log(`❌ Không thể kiểm tra vị thế hiện tại trước khi vào lệnh ${instId}.`);
+      return null;
+    }
+
+    const openPositions = (positionsRes.data || []).filter(p => Math.abs(parseFloat(p.pos || 0)) > 0);
+    if (openPositions.length >= 10) {
+      log(`⚠️ Đã đạt giới hạn tối đa 10 vị thế đang chạy.`);
+      return null;
+    }
+    if (openPositions.some(p => p.instId === instId)) {
+      log(`⚠️ ${instId}: Vị thế đã tồn tại, bỏ qua lệnh mới.`);
+      return null;
+    }
+    
     let currentLeverage = leverage;
     let qtyStr = "";
     let leverageFixed = false;
